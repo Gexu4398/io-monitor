@@ -80,7 +80,11 @@ iomon top                  # iotop 风格：每 2 秒刷新全部线程的 IO �
 iomon top -o 1             # 每 1 秒，只看有 IO 的线程
 iomon top -P 1             # 每 1 秒，按进程聚合
 iomon top -n 40 5 12       # 最多 40 行，5 秒一次共 12 次
+iomon web                  # 浏览器打开 http://127.0.0.1:8080
+iomon web 2 -l 9090        # 每 2 秒采样，监听 9090
 ```
+
+`iomon web` 提供一页实时视图：进程记账与实际落盘、设备利用率、线程/进程排行。页面上可以切换「仅活动 / 按进程」和搜索。Docker Compose 默认就是这个命令，映射宿主机 8080 端口。
 
 输出示例：
 
@@ -114,9 +118,10 @@ sda            12.3     45.6        512.0     2048.0     0.05     1.23     3.4
 
 ```bash
 docker compose build
-docker compose run --rm iomon top 1     # iotop 风格排行
+docker compose up -d                   # 浏览器打开 http://宿主机:8080
+docker compose run --rm iomon top 1     # 仍可临时跑命令行排行
 docker compose run --rm iomon -p $(pidof java)
-docker compose up -d && docker compose logs -f   # 长驻采集
+docker compose logs -f
 ```
 
 在容器内监控的同样是宿主机的 IO（`/proc` 为宿主机内核的全局数据）；监控其他用户进程的参数已配好。

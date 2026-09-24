@@ -3,7 +3,8 @@
 # 构建:          docker compose build
 # 交互式带参数:   docker compose run --rm iomon 1 -d vda
 # 监控宿主机进程: docker compose run --rm iomon -p <宿主机PID>
-# 后台长驻采集:   docker compose up -d && docker compose logs -f iomon
+# 浏览器查看:    docker compose up -d    然后打开 http://宿主机:8080
+# 后台日志:      docker compose logs -f iomon
 
 services:
   iomon:
@@ -24,7 +25,12 @@ services:
     security_opt:
       - apparmor:unconfined
 
-    # 分配 TTY 与 stdin,保证输出实时刷新、Ctrl+C 正常退出
+    # 浏览器查看页。docker compose run iomon top 仍会改去跑命令行。
+    command: ["web"]
+    ports:
+      - "8080:8080"
+
+    # 分配 TTY 与 stdin,保证命令行模式输出实时刷新、Ctrl+C 正常退出
     stdin_open: true
     tty: true
 

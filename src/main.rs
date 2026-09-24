@@ -10,6 +10,7 @@ mod proc_io;
 mod syscall;
 mod taskstats;
 mod vmstat;
+mod web;
 
 use std::process::exit;
 use std::thread::sleep;
@@ -25,6 +26,7 @@ iomon —— Linux IO 监控工具（零依赖，直接读取 /proc）
 用法:
     iomon [选项] [间隔秒数] [次数]          设备级速率视图
     iomon top [选项] [间隔秒数] [次数]      进程/线程 IO 排行（iotop 风格）
+    iomon web [间隔秒数]                    浏览器查看页，默认 http://127.0.0.1:8080
 
 位置参数:
     间隔秒数    采样间隔，支持小数，默认 2
@@ -48,6 +50,8 @@ iomon —— Linux IO 监控工具（零依赖，直接读取 /proc）
     iomon 1 -d sda -d dm-0     # 只看 sda 与 dm-0
     iomon -p $(pidof java) 1   # 同时观察某进程的读写速率与 IO 等待
     iomon top -P 1             # iotop 风格：每 1 秒刷新进程 IO 排行
+    iomon web                  # 浏览器打开 http://127.0.0.1:8080
+    iomon web 2 -l 9090        # 每 2 秒采样，只监听 9090 端口
 ";
 
 const USAGE_TOP: &str = "\
@@ -100,12 +104,24 @@ struct Snapshot {
 }
 
 fn main() {
+    let argv: Vec<String> = std::env::args().collect();
+    if argv.get(1).map(String::as_str) == Some("web") {
+        let opts = match web::parse_args(&argv[2..]) {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("错误: {}\n\n{}", e, web::USAGE);
+                exit(2);
+            }
+        };
+        web::serve(opts);
+        return;
+    }
+
     if !cfg!(target_os = "linux") {
         eprintln!("错误: iomon 依赖 /proc 文件系统，仅支持在 Linux 上运行。");
         exit(1);
     }
 
-    let argv: Vec<String> = std::env::args().collect();
     if argv.get(1).map(String::as_str) == Some("top") {
         let opts = match parse_top_args(&argv[2..]) {
             Ok(o) => o,

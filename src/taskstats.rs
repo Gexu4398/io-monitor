@@ -17,6 +17,7 @@ pub struct Delays {
     pub swapin_ns: u64,
 }
 
+#[cfg(any(test, target_os = "linux"))]
 const NLMSG_ERROR: u16 = 2;
 #[cfg(target_os = "linux")]
 const GENL_ID_CTRL: u16 = 0x10;
@@ -30,8 +31,11 @@ const CTRL_ATTR_FAMILY_NAME: u16 = 2;
 const TASKSTATS_CMD_GET: u8 = 1;
 #[cfg(target_os = "linux")]
 const TASKSTATS_CMD_ATTR_PID: u16 = 1;
+#[cfg(any(test, target_os = "linux"))]
 const TASKSTATS_TYPE_STATS: u16 = 3;
+#[cfg(any(test, target_os = "linux"))]
 const TASKSTATS_TYPE_AGGR_PID: u16 = 4;
+#[cfg(any(test, target_os = "linux"))]
 const TASKSTATS_TYPE_AGGR_TGID: u16 = 5;
 
 pub struct Taskstats {
@@ -152,6 +156,7 @@ fn family_id(fd: i32, buf: &mut [u8]) -> Option<u16> {
 }
 
 /// 从一条 taskstats 应答里取出延迟。错误报文返回正的 errno。
+#[cfg(any(test, target_os = "linux"))]
 pub(crate) fn delays_from_reply(buf: &[u8]) -> Result<Delays, i32> {
     if let Some(err) = nl_errno(buf) {
         return Err(err);
@@ -161,6 +166,7 @@ pub(crate) fn delays_from_reply(buf: &[u8]) -> Result<Delays, i32> {
     parse_delays(stats).ok_or(22)
 }
 
+#[cfg(any(test, target_os = "linux"))]
 pub(crate) fn parse_delays(stats: &[u8]) -> Option<Delays> {
     let version = read_u16(stats, 0)?;
     // v15 在 cpu_delay_total 之后插入了 max/min，后面的字段整体后移 16 字节，
@@ -178,6 +184,7 @@ pub(crate) fn parse_delays(stats: &[u8]) -> Option<Delays> {
     })
 }
 
+#[cfg(any(test, target_os = "linux"))]
 fn find_stats(attrs: &[u8]) -> Option<&[u8]> {
     let mut off = 0;
     while off + 4 <= attrs.len() {
@@ -236,6 +243,7 @@ fn walk_attrs(buf: &[u8], mut f: impl FnMut(u16, &[u8]) -> bool) {
     }
 }
 
+#[cfg(any(test, target_os = "linux"))]
 fn message_payload(buf: &[u8]) -> Option<&[u8]> {
     if buf.len() < 20 {
         return None;
@@ -249,6 +257,7 @@ fn message_payload(buf: &[u8]) -> Option<&[u8]> {
 }
 
 /// 内核把 errno 的相反数放在 NLMSG_ERROR 的第一个 int 里。
+#[cfg(any(test, target_os = "linux"))]
 fn nl_errno(buf: &[u8]) -> Option<i32> {
     if buf.len() < 20 {
         return None;
@@ -283,11 +292,13 @@ fn encode_request(nl_type: u16, cmd: u8, attr: u16, data: &[u8], seq: u32) -> Ve
     buf
 }
 
+#[cfg(any(test, target_os = "linux"))]
 fn read_u16(buf: &[u8], off: usize) -> Option<u16> {
     let bytes = buf.get(off..off + 2)?;
     Some(u16::from_le_bytes(bytes.try_into().ok()?))
 }
 
+#[cfg(any(test, target_os = "linux"))]
 fn read_u64(buf: &[u8], off: usize) -> Option<u64> {
     let bytes = buf.get(off..off + 8)?;
     Some(u64::from_le_bytes(bytes.try_into().ok()?))

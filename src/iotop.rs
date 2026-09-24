@@ -28,6 +28,8 @@ struct Ident {
     comm: String,
     /// 已格式化的命令行；内核线程为空串
     cmdline: String,
+    /// 线程所属进程。线程视图里 id 是 TID，进程视图里 id 与 pid 相同。
+    pid: u32,
     /// real uid；读取失败为 u32::MAX（显示为 "?"）
     uid: u32,
     /// iotop 风格的 IO 优先级，如 be/4、rt/4、idle
@@ -155,6 +157,7 @@ fn scan(per_process: bool, ts: &mut Option<Taskstats>) -> Scan {
             };
             let ident = Ident {
                 id: if per_process { pid } else { tid },
+                pid,
                 comm: stat.comm,
                 cmdline: cmdline.clone(),
                 uid,
@@ -313,13 +316,13 @@ fn load_passwd() -> HashMap<u32, String> {
         .unwrap_or_default()
 }
 
-fn user_name(uid: u32, passwd: &HashMap<u32, String>) -> String {
+fn user_name(uid: u32, passwd: &HashMap<u32, String>, max_chars: usize) -> String {
     if uid == u32::MAX {
         "?".to_string()
     } else {
         passwd
             .get(&uid)
-            .map(|n| truncate_chars(n, 8))
+            .map(|n| truncate_chars(n, max_chars))
             .unwrap_or_else(|| uid.to_string())
     }
 }
@@ -417,7 +420,7 @@ fn render(
             "{:>7} {:>4} {:<8} {:>11} {:>11} {:>8} {:>8}  {}",
             r.ident.id,
             r.ident.prio,
-            user_name(r.ident.uid, passwd),
+            user_name(r.ident.uid, passwd, 8),
             fmt_bps(r.read_bps),
             fmt_bps(r.write_bps),
             fmt_pct(r.swapin_pct),
@@ -457,6 +460,117 @@ pub fn run(opts: TopOptions) {
         render(&prev, &cur, elapsed, &opts, tty, &passwd, delayacct);
         prev = cur;
         printed += 1;
+    }
+}
+
+/// 网页用的一行线程速率。
+pub struct ProcRate {
+    pub tid: u32,
+    pub pid: u32,
+    pub prio: String,
+    pub user: String,
+    pub read_bps: f64,
+    pub write_bps: f64,
+    pub swapin_pct: f64,
+    pub io_pct: f64,
+    pub command: String,
+}
+
+/// 两次采样之间的进程/线程 IO。第一帧还没有差值，`ready` 为 false。
+pub struct IoFrame {
+    pub ready: bool,
+    pub elapsed_s: f64,
+    pub delayacct: bool,
+    pub skipped: usize,
+    /// 配对成功的线程数（截断之前）
+    pub threads: usize,
+    pub total_read: f64,
+    pub total_write: f64,
+    pub actual_read: f64,
+    pub actual_write: f64,
+    pub rows: Vec<ProcRate>,
+}
+
+/// 给网页轮询用的采样器。内部保住上一帧和 taskstats 套接字。
+pub struct ProcSampler {
+    prev: Option<Scan>,
+    ts: Option<Taskstats>,
+    passwd: HashMap<u32, String>,
+    delayacct: bool,
+}
+
+impl ProcSampler {
+    pub fn open() -> Self {
+        Self {
+            prev: None,
+            ts: Taskstats::open(),
+            passwd: load_passwd(),
+            delayacct: delayacct_enabled(),
+        }
+    }
+
+    /// 再采一帧。返回按读写速率排序后的前 `limit` 行。
+    pub fn poll(&mut self, limit: usize) -> IoFrame {
+        let cur = scan(false, &mut self.ts);
+        let Some(prev) = self.prev.as_ref() else {
+            let skipped = cur.skipped;
+            self.prev = Some(cur);
+            return IoFrame {
+                ready: false,
+                elapsed_s: 0.0,
+                delayacct: self.delayacct,
+                skipped,
+                threads: 0,
+                total_read: 0.0,
+                total_write: 0.0,
+                actual_read: 0.0,
+                actual_write: 0.0,
+                rows: Vec::new(),
+            };
+        };
+        let elapsed = cur.at.duration_since(prev.at).as_secs_f64().max(0.001);
+        let mut rows = diff(prev, &cur, elapsed);
+        order(&mut rows);
+        let (mut total_read, mut total_write) = (0.0, 0.0);
+        for row in &rows {
+            total_read += row.read_bps;
+            total_write += row.write_bps;
+        }
+        let (actual_read, actual_write) = actual_bps(prev, &cur, elapsed);
+        let threads = rows.len();
+        let skipped = cur.skipped;
+        let rows = rows
+            .into_iter()
+            .take(limit)
+            .map(|row| {
+                let command = cmd_of(&row.ident, 240);
+                let user = user_name(row.ident.uid, &self.passwd, 32);
+                ProcRate {
+                    tid: row.ident.id,
+                    pid: row.ident.pid,
+                    prio: row.ident.prio,
+                    user,
+                    read_bps: row.read_bps,
+                    write_bps: row.write_bps,
+                    swapin_pct: row.swapin_pct,
+                    io_pct: row.io_pct,
+                    command,
+                }
+            })
+            .collect();
+        self.prev = Some(cur);
+        IoFrame {
+            ready: true,
+            elapsed_s: elapsed,
+            delayacct: self.delayacct,
+            skipped,
+            threads,
+            total_read,
+            total_write,
+            actual_read,
+            actual_write,
+            rows,
+        }
     }
 }
 
@@ -503,6 +617,7 @@ mod tests {
     fn ident(id: u32) -> Ident {
         Ident {
             id,
+            pid: id,
             comm: format!("t{}", id),
             cmdline: String::new(),
             uid: 1000,
