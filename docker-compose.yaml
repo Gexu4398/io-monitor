@@ -10,6 +10,8 @@ services:
   iomon:
     build: .
     image: iomon:latest
+    # 退出或宿主机重启后自动拉起；docker compose stop 之后保持停止
+    restart: unless-stopped
 
     # 共享宿主机 PID 空间,这样 top / -p 看到的是宿主机进程。
     # 磁盘级监控不需要这项:/proc/diskstats 与 /proc/vmstat 本身就是宿主机全局数据。
