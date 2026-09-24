@@ -151,8 +151,30 @@
     background: var(--read); border-radius: 999px; padding: 8px 14px; font-weight: 600;
   }
   #app.hidden { display: none; }
+  .nav { display: flex; gap: 6px; }
+  .nav a {
+    text-decoration: none; color: var(--muted); padding: 7px 12px;
+    border-radius: 999px; border: 1px solid transparent;
+  }
+  .nav a.on { color: var(--ink); background: var(--raise); border-color: var(--line); }
+  .badge {
+    display: inline-block; min-width: 16px; margin-left: 6px; padding: 0 5px;
+    border-radius: 99px; background: var(--io); color: #1a100e;
+    font-size: 11px; font-weight: 600; vertical-align: 1px;
+  }
+  .th-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .th-row button {
+    background: var(--raise); border: 1px solid var(--line); color: var(--muted);
+    border-radius: 999px; padding: 7px 12px; cursor: pointer;
+  }
+  .th-row button.on { color: #1a140c; background: var(--read); border-color: transparent; font-weight: 600; }
+  .chart-label { margin: 0; padding: 14px 16px 0; color: var(--muted); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; }
+  .bars { display: flex; align-items: flex-end; gap: 3px; height: 96px; padding: 8px 16px 16px; }
+  .bars i { flex: 1; min-width: 3px; border-radius: 3px 3px 0 0; background: rgba(224, 109, 98, 0.9); min-height: 2px; }
+  .bars.write i { background: rgba(61, 190, 168, 0.9); }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 14px; }
   @media (max-width: 980px) {
-    .cards { grid-template-columns: 1fr 1fr; }
+    .cards, .two { grid-template-columns: 1fr 1fr; }
     .dev { grid-template-columns: 90px 1fr; }
     .dev .meta { grid-column: 1 / -1; }
   }
@@ -174,12 +196,17 @@
       </div>
     </div>
     <div class="tools">
+      <nav class="nav">
+        <a href="/" id="navLive">实时</a>
+        <a href="/alerts" id="navAlerts">告警<span class="badge" id="alertBadge" hidden>0</span></a>
+      </nav>
       <span class="status"><span class="dot" id="dot"></span><span id="age">—</span></span>
       <label class="pill" id="onlyLabel"><input type="checkbox" id="only">仅活动</label>
       <label class="pill" id="procLabel"><input type="checkbox" id="proc">按进程</label>
       <input id="q" type="search" placeholder="搜索命令、用户或 TID" autocomplete="off">
     </div>
   </header>
+  <div id="viewLive">
   <div class="banner" id="banner"></div>
   <section class="cards">
     <article class="card read"><div class="k">进程记账 · 读</div><div class="v" id="tr">—</div><canvas class="spark" id="s1"></canvas></article>
@@ -213,6 +240,71 @@
       <div class="empty" id="empty" hidden>这一帧没有匹配的线程。</div>
     </div>
   </section>
+  </div>
+  <div id="viewAlerts" hidden>
+    <div class="banner" id="alertBanner"></div>
+    <div class="th-row" id="dayRow" style="margin-bottom:14px"></div>
+    <p class="note">某一秒超过阈值就会记下来，不必持续。这里看的是选出的那一天，记录保留 7 天。</p>
+    <div class="th-row" id="thresholdRow" style="margin-bottom:14px">
+      <span class="status">IO 占比阈值</span>
+      <button type="button" data-th="10">10%</button>
+      <button type="button" data-th="20">20%</button>
+      <button type="button" data-th="50">50%</button>
+      <button type="button" data-th="80">80%</button>
+    </div>
+    <section class="cards">
+      <article class="card"><div class="k">正在超标</div><div class="v" id="aOpen">—</div></article>
+      <article class="card"><div class="k">峰值 IO</div><div class="v" id="aPeakIo">—</div><p class="note" id="aPeakIoMeta"></p></article>
+      <article class="card write"><div class="k">落盘写高峰</div><div class="v" id="aPeakW">—</div><p class="note" id="aPeakWMeta"></p></article>
+      <article class="card read"><div class="k">落盘读高峰</div><div class="v" id="aPeakR">—</div><p class="note" id="aPeakRMeta"></p></article>
+    </section>
+    <div class="two">
+      <section class="panel">
+        <h2 class="chart-label">每分钟 IO 峰值</h2>
+        <div class="bars" id="ioBars"></div>
+      </section>
+      <section class="panel">
+        <h2 class="chart-label">每分钟落盘写峰值</h2>
+        <div class="bars write" id="wBars"></div>
+      </section>
+    </div>
+    <section class="panel">
+      <h2>当前超标</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th class="l">PID</th><th class="l">USER</th><th>IO</th><th>持续</th><th>读</th><th>写</th><th class="l">COMMAND</th>
+          </tr></thead>
+          <tbody id="curBody"></tbody>
+        </table>
+        <div class="empty" id="curEmpty" hidden>这一天没有正在超标的进程。</div>
+      </div>
+    </section>
+    <section class="panel">
+      <h2>进程统计</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th class="l">PID</th><th class="l">USER</th><th>次数</th><th>累计</th><th>最高 IO</th><th>最高写</th><th>最近</th><th class="l">COMMAND</th>
+          </tr></thead>
+          <tbody id="offBody"></tbody>
+        </table>
+        <div class="empty" id="offEmpty" hidden>还没有超标记录。</div>
+      </div>
+    </section>
+    <section class="panel">
+      <h2>超标片段</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th class="l">状态</th><th>开始</th><th>结束</th><th>时长</th><th>峰值 IO</th><th>峰值写</th><th class="l">COMMAND</th>
+          </tr></thead>
+          <tbody id="epBody"></tbody>
+        </table>
+        <div class="empty" id="epEmpty" hidden>这一天没有超过阈值的记录。出现一次就算，哪怕只有一秒。</div>
+      </div>
+    </section>
+  </div>
 </div>
 <section class="gate" id="gate">
   <span class="glyph" aria-hidden="true"><i></i><i></i></span>
@@ -318,6 +410,7 @@ function render(data) {
   }
   gate.classList.remove("show");
   app.classList.remove("hidden");
+  setBadge(data.alerts || 0);
   const host = data.host ? data.host + " · " : "";
   const every = data.interval_s ? data.interval_s + "s" : "";
   $("sub").textContent = preview
@@ -420,7 +513,230 @@ function paintPills() {
 ["only", "proc", "q"].forEach((id) => $(id).addEventListener("input", paintPills));
 window.addEventListener("resize", () => { if (latest) render(latest); });
 
+const onAlerts = location.pathname === "/alerts";
+function bootNav() {
+  $("viewLive").hidden = onAlerts;
+  $("viewAlerts").hidden = !onAlerts;
+  $("navLive").classList.toggle("on", !onAlerts);
+  $("navAlerts").classList.toggle("on", onAlerts);
+  $("onlyLabel").hidden = onAlerts;
+  $("procLabel").hidden = onAlerts;
+  $("q").hidden = onAlerts;
+  document.querySelector(".status").hidden = onAlerts;
+}
+function setBadge(n) {
+  const badge = $("alertBadge");
+  const count = Number(n) || 0;
+  badge.hidden = count <= 0;
+  badge.textContent = count;
+}
+function fmtTime(sec) {
+  if (!sec) return "—";
+  const d = new Date(sec * 1000);
+  const p = (n) => String(n).padStart(2, "0");
+  return p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+}
+let selectedOffset = 0;
+function dayBounds(offset) {
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  start.setDate(start.getDate() - offset);
+  const end = new Date(start.getTime());
+  end.setDate(end.getDate() + 1);
+  return { from: Math.floor(start.getTime() / 1000), to: Math.floor(end.getTime() / 1000) };
+}
+function paintDays() {
+  const row = $("dayRow");
+  if (!row) return;
+  row.innerHTML = "";
+  for (let i = 0; i < 7; i++) {
+    const btn = document.createElement("button");
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    d.setDate(d.getDate() - i);
+    btn.type = "button";
+    btn.textContent = i === 0 ? "今天" : (d.getMonth() + 1) + "/" + d.getDate();
+    btn.classList.toggle("on", i === selectedOffset);
+    btn.addEventListener("click", () => {
+      selectedOffset = i;
+      paintDays();
+      tick();
+    });
+    row.appendChild(btn);
+  }
+}
+function spanText(row, now) {
+  if ((row.samples || 0) <= 1) return "瞬时";
+  return fmtDur(row.open ? now - row.start : row.over_s);
+}
+function fmtDur(sec) {
+  sec = Math.max(0, Math.round(Number(sec) || 0));
+  if (sec < 60) return sec + " 秒";
+  const m = Math.floor(sec / 60);
+  if (m < 60) return m + " 分 " + (sec % 60) + " 秒";
+  return Math.floor(m / 60) + " 小时 " + (m % 60) + " 分";
+}
+function fillBars(el, items, value, scale, title) {
+  el.innerHTML = "";
+  const max = Math.max(scale || 0, 1);
+  items.forEach((item) => {
+    const bar = document.createElement("i");
+    const v = value(item) || 0;
+    bar.style.height = Math.max(2, (v / max) * 88) + "px";
+    bar.title = title(item);
+    el.appendChild(bar);
+  });
+}
+function fillCmdRow(body, cells) {
+  const tr = document.createElement("tr");
+  cells.forEach((cell, i) => {
+    const td = document.createElement("td");
+    if (cell.left) td.className = "l" + (cell.cmd ? " cmd" : "");
+    if (cell.mono) td.classList.add("mono");
+    td.textContent = cell.text;
+    if (cell.cmd) td.title = cell.text;
+    tr.appendChild(td);
+  });
+  body.appendChild(tr);
+}
+const DEMO_ALERTS = {
+  ok: true, delayacct: true, host: "preview", threshold: 20, interval_s: 1,
+  now: 1_700_000_000, open: 1, samples: 180, alert_samples: 42,
+  peak_io: 86.4, peak_io_at: 1_699_999_200, peak_io_cmd: "python langgraph dev", peak_io_pid: 56820,
+  peak_write: 8.4e6, peak_write_at: 1_699_999_400,
+  peak_read: 1.6e6, peak_read_at: 1_699_998_800,
+  current: [{ pid: 56820, user: "root", command: "python /app/.venv/bin/langgraph dev", start: 1_699_999_860, max_io: 64.2, max_read: 0, max_write: 3.4e6, samples: 12, over_s: 12 }],
+  offenders: [
+    { pid: 56820, user: "root", command: "python /app/.venv/bin/langgraph dev", episodes: 3, samples: 40, over_s: 46, max_io: 86.4, max_read: 0, max_write: 6.1e6, last: 1_700_000_000 },
+    { pid: 81494, user: "root", command: "chrome-profile [HangWatcher]", episodes: 1, samples: 8, over_s: 9, max_io: 41.0, max_read: 2.2e6, max_write: 1.1e6, last: 1_699_999_100 }
+  ],
+  episodes: [
+    { pid: 56820, user: "root", command: "python /app/.venv/bin/langgraph dev", start: 1_699_999_860, end: 1_700_000_000, open: true, samples: 12, over_s: 12, max_io: 64.2, max_write: 3.4e6 },
+    { pid: 81494, user: "root", command: "chrome-profile [HangWatcher]", start: 1_699_998_400, end: 1_699_998_430, open: false, samples: 8, over_s: 9, max_io: 41, max_write: 1.1e6 }
+  ],
+  minutes: Array.from({ length: 24 }, (_, i) => ({
+    t: 1_699_998_560 + i * 60,
+    max_io: 10 + Math.round(40 * Math.abs(Math.sin(i / 3))),
+    max_write: 2e5 + 4e6 * Math.abs(Math.sin(i / 4)),
+    top_cmd: i % 5 === 0 ? "python langgraph dev" : "chrome-profile",
+    over: i % 4 === 0 ? 3 : 0
+  }))
+};
+function renderAlerts(data) {
+  if (!data || data.ok === false) {
+    $("alertBanner").className = "banner show";
+    $("alertBanner").textContent = (data && data.error) || "告警数据还没到。";
+    return;
+  }
+  $("sub").textContent = (data.host ? data.host + " · " : "") + "IO 超过 " + Math.round(data.threshold) + "% 会记下来";
+  const banner = $("alertBanner");
+  if (!data.delayacct) {
+    banner.className = "banner show";
+    banner.textContent = "task_delayacct 未开启，IO 百分比一直是 0，超标名单不会增加。落盘读写的高峰仍会统计。";
+  } else if (preview) {
+    banner.className = "banner show info";
+    banner.textContent = "示例数据，不是这台机器的告警。";
+  } else {
+    banner.className = "banner";
+    banner.textContent = "";
+  }
+  $("aOpen").textContent = String(data.open || 0);
+  $("aPeakIo").innerHTML = (data.peak_io || 0).toFixed(1) + '<span class="u">%</span>';
+  $("aPeakIoMeta").textContent = data.peak_io_cmd ? fmtTime(data.peak_io_at) + "  " + data.peak_io_cmd : "还没有";
+  const pw = fmtBps(data.peak_write || 0), pr = fmtBps(data.peak_read || 0);
+  $("aPeakW").innerHTML = pw.n + '<span class="u">' + pw.u + "</span>";
+  $("aPeakWMeta").textContent = data.peak_write_at ? fmtTime(data.peak_write_at) : "还没有";
+  $("aPeakR").innerHTML = pr.n + '<span class="u">' + pr.u + "</span>";
+  $("aPeakRMeta").textContent = data.peak_read_at ? fmtTime(data.peak_read_at) : "还没有";
+  document.querySelectorAll("#thresholdRow button").forEach((btn) => {
+    btn.classList.toggle("on", Number(btn.dataset.th) === Math.round(data.threshold));
+  });
+  setBadge(data.open || 0);
+  const minutes = data.minutes || [];
+  fillBars($("ioBars"), minutes, (m) => m.max_io || 0, 100, (m) => fmtTime(m.t) + "  IO " + (m.max_io || 0).toFixed(1) + "%  " + (m.top_cmd || ""));
+  const wmax = Math.max.apply(null, minutes.map((m) => m.max_write || 0).concat([1]));
+  fillBars($("wBars"), minutes, (m) => m.max_write || 0, wmax, (m) => {
+    const f = fmtBps(m.max_write || 0);
+    return fmtTime(m.t) + "  写 " + f.n + " " + f.u;
+  });
+  const now = data.now || 0;
+  const cur = $("curBody");
+  cur.innerHTML = "";
+  (data.current || []).forEach((row) => {
+    const rd = fmtBps(row.max_read || 0), wr = fmtBps(row.max_write || 0);
+    fillCmdRow(cur, [
+      { text: row.pid, left: true, mono: true },
+      { text: row.user, left: true },
+      { text: (row.last_io || row.max_io || 0).toFixed(1) + " %", mono: true },
+      { text: spanText(row, now), mono: true },
+      { text: rd.n + " " + rd.u, mono: true },
+      { text: wr.n + " " + wr.u, mono: true },
+      { text: row.command, left: true, cmd: true }
+    ]);
+  });
+  $("curEmpty").hidden = (data.current || []).length > 0;
+  const off = $("offBody");
+  off.innerHTML = "";
+  (data.offenders || []).forEach((row) => {
+    const wr = fmtBps(row.max_write || 0);
+    fillCmdRow(off, [
+      { text: row.pid, left: true, mono: true },
+      { text: row.user, left: true },
+      { text: row.episodes, mono: true },
+      { text: fmtDur(row.over_s), mono: true },
+      { text: (row.max_io || 0).toFixed(1) + " %", mono: true },
+      { text: wr.n + " " + wr.u, mono: true },
+      { text: fmtTime(row.last), mono: true },
+      { text: row.command, left: true, cmd: true }
+    ]);
+  });
+  $("offEmpty").hidden = (data.offenders || []).length > 0;
+  const ep = $("epBody");
+  ep.innerHTML = "";
+  (data.episodes || []).forEach((row) => {
+    const wr = fmtBps(row.max_write || 0);
+    fillCmdRow(ep, [
+      { text: row.open ? "持续中" : "已结束", left: true },
+      { text: fmtTime(row.start), mono: true },
+      { text: row.open ? "—" : fmtTime(row.end), mono: true },
+      { text: spanText(row, now), mono: true },
+      { text: (row.max_io || 0).toFixed(1) + " %", mono: true },
+      { text: wr.n + " " + wr.u, mono: true },
+      { text: row.command, left: true, cmd: true }
+    ]);
+  });
+  $("epEmpty").hidden = (data.episodes || []).length > 0;
+}
+document.querySelectorAll("#thresholdRow button").forEach((btn) => {
+  btn.addEventListener("click", async () => {
+    const value = btn.dataset.th;
+    if (preview) {
+      DEMO_ALERTS.threshold = Number(value);
+      renderAlerts(DEMO_ALERTS);
+      return;
+    }
+    const range = dayBounds(selectedOffset);
+    try {
+      const res = await fetch("/api/alerts?from=" + range.from + "&to=" + range.to + "&threshold=" + value, { cache: "no-store" });
+      const data = await res.json();
+      data.threshold = Number(value);
+      renderAlerts(data);
+    } catch (e) {}
+  });
+});
+
 async function tick() {
+  if (onAlerts) {
+    if (preview) { renderAlerts(DEMO_ALERTS); return; }
+    const range = dayBounds(selectedOffset);
+    try {
+    const res = await fetch("/api/alerts?from=" + range.from + "&to=" + range.to, { cache: "no-store" });
+      renderAlerts(await res.json());
+    } catch (e) {
+      renderAlerts({ ok: false, error: "连不上 iomon web。" });
+    }
+    return;
+  }
   if (preview) {
     if (!hist[0].length) {
       const base = [DEMO.total_read, DEMO.total_write, DEMO.actual_read, DEMO.actual_write];
@@ -439,8 +755,10 @@ async function tick() {
     render({ ok: false, error: "连不上 iomon web。确认进程还在，并且用的是它提供的地址。" });
   }
 }
+bootNav();
+if (onAlerts) paintDays();
 tick();
-if (!preview) setInterval(tick, 1000);
+if (!preview) setInterval(tick, onAlerts ? 15000 : 1000);
 </script>
 </body>
 </html>

@@ -3,15 +3,17 @@
 //! 采样在后台进行，HTTP 只负责把最近一帧 JSON 和页面发出去。
 //! 不引入第三方库，页面随二进制一起编译进去。
 
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::exit;
 use std::sync::{Arc, Mutex};
 use std::thread::sleep;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::alerts::{AlertBook, ProcSnap};
 use crate::diskstats::{self, DiskStats};
-use crate::iotop::{IoFrame, ProcSampler};
+use crate::iotop::{IoFrame, ProcRate, ProcSampler};
 
 const PAGE: &str = include_str!("assets/index.html");
 const ROW_LIMIT: usize = 200;
@@ -70,6 +72,7 @@ iomon web —— 在浏览器里查看 IO
     -h, --help          显示本帮助
 
 页面上可以切换「仅活动 / 按进程」和搜索，不必重启。
+告警页在 /alerts，默认记下 IO 占比达到 20% 的进程，可在页面上改阈值。
 ";
 
 fn normalize_addr(raw: &str) -> Result<String, String> {
@@ -159,6 +162,15 @@ fn sample_devices(prev: &mut Option<DiskSample>) -> Vec<DeviceRate> {
     rates
 }
 
+struct Hub {
+    live: String,
+    book: AlertBook,
+    threshold: f64,
+    host: String,
+    interval: f64,
+    delayacct: bool,
+}
+
 fn hostname() -> String {
     std::fs::read_to_string("/proc/sys/kernel/hostname")
         .unwrap_or_else(|_| "localhost".to_string())
@@ -166,13 +178,42 @@ fn hostname() -> String {
         .to_string()
 }
 
-fn sampler_loop(published: Arc<Mutex<String>>, interval: f64) {
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn aggregate_procs(rows: &[ProcRate]) -> Vec<ProcSnap> {
+    let mut map: HashMap<u32, ProcSnap> = HashMap::new();
+    for row in rows {
+        let entry = map.entry(row.pid).or_insert(ProcSnap {
+            pid: row.pid,
+            user: row.user.clone(),
+            command: row.command.clone(),
+            io: 0.0,
+            read: 0.0,
+            write: 0.0,
+        });
+        entry.io = (entry.io + row.io_pct).min(100.0);
+        entry.read += row.read_bps;
+        entry.write += row.write_bps;
+        if row.tid == row.pid || entry.command.is_empty() {
+            entry.command = row.command.clone();
+            entry.user = row.user.clone();
+        }
+    }
+    map.into_values().collect()
+}
+
+fn sampler_loop(hub: Arc<Mutex<Hub>>, interval: f64) {
     if !cfg!(target_os = "linux") {
         let body = json_error(
             0,
             "这台机器没有 /proc。采集只能在 Linux 上运行；页面本身可以用 ?preview=1 看布局。",
         );
-        *published.lock().unwrap() = body;
+        hub.lock().unwrap().live = body;
         return;
     }
     let host = hostname();
@@ -182,9 +223,27 @@ fn sampler_loop(published: Arc<Mutex<String>>, interval: f64) {
     loop {
         let frame = procs.poll(ROW_LIMIT);
         let devices = sample_devices(&mut disks);
+        let snaps = if frame.ready {
+            aggregate_procs(&frame.rows)
+        } else {
+            Vec::new()
+        };
         seq = seq.wrapping_add(1);
-        let body = json_frame(seq, interval, &host, &frame, &devices);
-        *published.lock().unwrap() = body;
+        let mut guard = hub.lock().unwrap();
+        let threshold = guard.threshold;
+        guard.book.set_threshold(threshold);
+        if frame.ready {
+            guard.book.ingest(
+                unix_now(),
+                frame.elapsed_s,
+                frame.actual_read,
+                frame.actual_write,
+                &snaps,
+            );
+        }
+        guard.delayacct = frame.delayacct;
+        guard.live = json_frame(seq, interval, &host, &frame, &devices, guard.book.open_count());
+        drop(guard);
         sleep(Duration::from_secs_f64(interval));
     }
 }
@@ -203,9 +262,19 @@ pub fn serve(opts: WebOptions) {
         browse, opts.interval
     );
 
-    let published = Arc::new(Mutex::new(json_pending()));
-    let worker = Arc::clone(&published);
     let interval = opts.interval;
+    let now = unix_now();
+    let book = AlertBook::open(crate::alerts::data_dir(), 20.0, now);
+    let threshold = book.threshold;
+    let published = Arc::new(Mutex::new(Hub {
+        live: json_pending(),
+        book,
+        threshold,
+        host: hostname(),
+        interval,
+        delayacct: true,
+    }));
+    let worker = Arc::clone(&published);
     std::thread::spawn(move || sampler_loop(worker, interval));
 
     for conn in listener.incoming() {
@@ -229,28 +298,55 @@ fn browse_hint(addr: &str) -> String {
     format!("http://{}", addr)
 }
 
-fn handle(stream: &mut TcpStream, published: &Mutex<String>) -> std::io::Result<()> {
+fn handle(stream: &mut TcpStream, hub: &Mutex<Hub>) -> std::io::Result<()> {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(3)));
-    let mut buf = [0u8; 2048];
+    let mut buf = [0u8; 4096];
     let n = stream.read(&mut buf).unwrap_or(0);
     let req = String::from_utf8_lossy(&buf[..n]);
-    let path = req
+    let raw = req
         .lines()
         .next()
         .unwrap_or("")
         .split_whitespace()
         .nth(1)
         .unwrap_or("/");
-    let path = path.split('?').next().unwrap_or("/");
+    let path = raw.split('?').next().unwrap_or("/");
     match path {
-        "/" | "/index.html" => write_resp(stream, "200 OK", "text/html; charset=utf-8", PAGE.as_bytes()),
+        "/" | "/index.html" | "/alerts" => {
+            write_resp(stream, "200 OK", "text/html; charset=utf-8", PAGE.as_bytes())
+        }
         "/api/live" => {
-            let body = published.lock().unwrap().clone();
+            let body = hub.lock().unwrap().live.clone();
+            write_resp(stream, "200 OK", "application/json; charset=utf-8", body.as_bytes())
+        }
+        "/api/alerts" => {
+            let mut guard = hub.lock().unwrap();
+            if let Some(value) = query_param(raw, "threshold").and_then(|s| s.parse::<f64>().ok()) {
+                let value = value.clamp(1.0, 100.0);
+                guard.threshold = value;
+                guard.book.set_threshold(value);
+            }
+            let now = unix_now();
+            let from = query_param(raw, "from").and_then(|s| s.parse().ok()).unwrap_or(0);
+            let to = query_param(raw, "to").and_then(|s| s.parse().ok()).unwrap_or(0);
+            let body = guard.book.to_json(guard.delayacct, &guard.host, guard.interval, now, from, to);
+            drop(guard);
             write_resp(stream, "200 OK", "application/json; charset=utf-8", body.as_bytes())
         }
         _ => write_resp(stream, "404 Not Found", "text/plain; charset=utf-8", b"not found"),
     }
+}
+
+fn query_param(raw: &str, key: &str) -> Option<String> {
+    let query = raw.split_once('?')?.1;
+    for part in query.split('&') {
+        let (name, value) = part.split_once('=').unwrap_or((part, ""));
+        if name == key {
+            return Some(value.to_string());
+        }
+    }
+    None
 }
 
 fn write_resp(stream: &mut TcpStream, status: &str, ctype: &str, body: &[u8]) -> std::io::Result<()> {
@@ -264,18 +360,25 @@ fn write_resp(stream: &mut TcpStream, status: &str, ctype: &str, body: &[u8]) ->
 }
 
 fn json_pending() -> String {
-    "{\"ok\":true,\"seq\":0,\"ready\":false,\"error\":null,\"host\":\"\",\"interval_s\":0,\"elapsed_s\":0,\"delayacct\":true,\"skipped\":0,\"threads\":0,\"total_read\":0,\"total_write\":0,\"actual_read\":0,\"actual_write\":0,\"devices\":[],\"rows\":[]}".to_string()
+    "{\"ok\":true,\"seq\":0,\"ready\":false,\"error\":null,\"host\":\"\",\"interval_s\":0,\"elapsed_s\":0,\"delayacct\":true,\"skipped\":0,\"threads\":0,\"alerts\":0,\"total_read\":0,\"total_write\":0,\"actual_read\":0,\"actual_write\":0,\"devices\":[],\"rows\":[]}".to_string()
 }
 
 fn json_error(seq: u64, message: &str) -> String {
     format!(
-        "{{\"ok\":false,\"seq\":{},\"ready\":false,\"error\":{},\"host\":\"\",\"interval_s\":0,\"elapsed_s\":0,\"delayacct\":false,\"skipped\":0,\"threads\":0,\"total_read\":0,\"total_write\":0,\"actual_read\":0,\"actual_write\":0,\"devices\":[],\"rows\":[]}}",
+        "{{\"ok\":false,\"seq\":{},\"ready\":false,\"error\":{},\"host\":\"\",\"interval_s\":0,\"elapsed_s\":0,\"delayacct\":false,\"skipped\":0,\"threads\":0,\"alerts\":0,\"total_read\":0,\"total_write\":0,\"actual_read\":0,\"actual_write\":0,\"devices\":[],\"rows\":[]}}",
         seq,
         json_str(message)
     )
 }
 
-fn json_frame(seq: u64, interval: f64, host: &str, frame: &IoFrame, devices: &[DeviceRate]) -> String {
+fn json_frame(
+    seq: u64,
+    interval: f64,
+    host: &str,
+    frame: &IoFrame,
+    devices: &[DeviceRate],
+    alerts: usize,
+) -> String {
     let mut out = String::with_capacity(4096);
     out.push_str("{\"ok\":true,\"seq\":");
     out.push_str(&seq.to_string());
@@ -293,6 +396,8 @@ fn json_frame(seq: u64, interval: f64, host: &str, frame: &IoFrame, devices: &[D
     out.push_str(&frame.skipped.to_string());
     out.push_str(",\"threads\":");
     out.push_str(&frame.threads.to_string());
+    out.push_str(",\"alerts\":");
+    out.push_str(&alerts.to_string());
     out.push_str(",\"total_read\":");
     push_num(&mut out, frame.total_read);
     out.push_str(",\"total_write\":");

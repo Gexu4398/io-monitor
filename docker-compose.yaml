@@ -39,6 +39,10 @@ services:
     # top 视图的 USER 列需要解析宿主机用户名(scratch 镜像内没有该文件)
     volumes:
       - /etc/passwd:/etc/passwd:ro
+      # 告警历史，保留 7 天。不要把这个目录提交进 git。
+      - ./deploy/alerts:/var/lib/iomon
+    environment:
+      - IOMON_DATA=/var/lib/iomon
 
     # 按需在此写死启动参数(会作为 iomon 的命令行参数追加),例如:
     # command: ["1", "-d", "vda"]

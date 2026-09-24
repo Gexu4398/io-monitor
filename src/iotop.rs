@@ -229,7 +229,7 @@ fn diff(prev: &Scan, cur: &Scan, elapsed_s: f64) -> Vec<Row> {
         .collect()
 }
 
-/// 排序：按读写速率合计降序，其次 IO%、SWAPIN，最后按 ID 保证稳定。
+/// 按读写速率合计降序，其次 IO%、SWAPIN，最后按 ID 保证稳定。
 fn order(rows: &mut [Row]) {
     rows.sort_by(|a, b| {
         (b.read_bps + b.write_bps)
