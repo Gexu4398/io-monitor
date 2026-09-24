@@ -1,0 +1,36 @@
+# iomon —— 宿主机 IO 监控(Docker 方式启动)
+#
+# 构建:          docker compose build
+# 交互式带参数:   docker compose run --rm iomon 1 -d vda
+# 监控宿主机进程: docker compose run --rm iomon -p <宿主机PID>
+# 后台长驻采集:   docker compose up -d && docker compose logs -f iomon
+
+services:
+  iomon:
+    build: .
+    image: iomon:latest
+
+    # 共享宿主机 PID 空间,这样 top / -p 看到的是宿主机进程。
+    # 磁盘级监控不需要这项:/proc/diskstats 与 /proc/vmstat 本身就是宿主机全局数据。
+    pid: "host"
+    cap_add:
+      # 读其他用户的 /proc/<pid>/io
+      - SYS_PTRACE
+      # taskstats: SWAPIN% 与 IO%（GENL_ADMIN_PERM）
+      - NET_ADMIN
+
+    # Ubuntu 默认 AppArmor 只允许 ptrace 同为 docker-default 的进程,
+    # 不放开的话读不到宿主机上的 chrome / systemd。
+    security_opt:
+      - apparmor:unconfined
+
+    # 分配 TTY 与 stdin,保证输出实时刷新、Ctrl+C 正常退出
+    stdin_open: true
+    tty: true
+
+    # top 视图的 USER 列需要解析宿主机用户名(scratch 镜像内没有该文件)
+    volumes:
+      - /etc/passwd:/etc/passwd:ro
+
+    # 按需在此写死启动参数(会作为 iomon 的命令行参数追加),例如:
+    # command: ["1", "-d", "vda"]

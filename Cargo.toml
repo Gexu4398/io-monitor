@@ -1,0 +1,15 @@
+[package]
+name = "io-monitor"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.70"
+description = "Linux 磁盘与进程 IO 监控工具（零依赖，读取 /proc）"
+license = "MIT"
+
+[[bin]]
+name = "iomon"
+path = "src/main.rs"
+
+[profile.release]
+lto = true
+strip = true
