@@ -866,7 +866,7 @@ mod tests {
 
     #[test]
     fn one_second_spike_is_kept_on_disk() {
-        let dir = std::env::temp_dir().join(format!("iomon-alert-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("iomon-records-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let mut book = AlertBook::open(dir.clone(), 20.0, 1_700_000_000);
         book.ingest(1_700_000_000, 1.0, 0.0, 10.0, &[snap(9, 55.0, 80.0)]);

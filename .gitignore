@@ -1,4 +1,4 @@
 /target
 .idea
 deploy/images/
-deploy/alerts/
+deploy/records/

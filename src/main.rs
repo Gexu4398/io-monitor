@@ -3,7 +3,7 @@
 //! 直接读取 /proc/diskstats 与 /proc/<pid>/io，按采样间隔计算差值，
 //! 输出 iostat 风格的磁盘/进程 IO 速率。零第三方依赖。
 
-mod alerts;
+mod records;
 mod diskstats;
 mod ioprio;
 mod iotop;

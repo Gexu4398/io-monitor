@@ -157,11 +157,6 @@
     border-radius: 999px; border: 1px solid transparent;
   }
   .nav a.on { color: var(--ink); background: var(--raise); border-color: var(--line); }
-  .badge {
-    display: inline-block; min-width: 16px; margin-left: 6px; padding: 0 5px;
-    border-radius: 99px; background: var(--io); color: #1a100e;
-    font-size: 11px; font-weight: 600; vertical-align: 1px;
-  }
   .th-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
   .th-row button {
     background: var(--raise); border: 1px solid var(--line); color: var(--muted);
@@ -198,7 +193,7 @@
     <div class="tools">
       <nav class="nav">
         <a href="/" id="navLive">实时</a>
-        <a href="/alerts" id="navAlerts">告警<span class="badge" id="alertBadge" hidden>0</span></a>
+        <a href="/records" id="navAlerts">记录</a>
       </nav>
       <span class="status"><span class="dot" id="dot"></span><span id="age">—</span></span>
       <label class="pill" id="onlyLabel"><input type="checkbox" id="only">仅活动</label>
@@ -410,7 +405,6 @@ function render(data) {
   }
   gate.classList.remove("show");
   app.classList.remove("hidden");
-  setBadge(data.alerts || 0);
   const host = data.host ? data.host + " · " : "";
   const every = data.interval_s ? data.interval_s + "s" : "";
   $("sub").textContent = preview
@@ -513,7 +507,7 @@ function paintPills() {
 ["only", "proc", "q"].forEach((id) => $(id).addEventListener("input", paintPills));
 window.addEventListener("resize", () => { if (latest) render(latest); });
 
-const onAlerts = location.pathname === "/alerts";
+const onAlerts = location.pathname === "/records";
 function bootNav() {
   $("viewLive").hidden = onAlerts;
   $("viewAlerts").hidden = !onAlerts;
@@ -523,12 +517,6 @@ function bootNav() {
   $("procLabel").hidden = onAlerts;
   $("q").hidden = onAlerts;
   document.querySelector(".status").hidden = onAlerts;
-}
-function setBadge(n) {
-  const badge = $("alertBadge");
-  const count = Number(n) || 0;
-  badge.hidden = count <= 0;
-  badge.textContent = count;
 }
 function fmtTime(sec) {
   if (!sec) return "—";
@@ -625,7 +613,7 @@ const DEMO_ALERTS = {
 function renderAlerts(data) {
   if (!data || data.ok === false) {
     $("alertBanner").className = "banner show";
-    $("alertBanner").textContent = (data && data.error) || "告警数据还没到。";
+    $("alertBanner").textContent = (data && data.error) || "记录还没到。";
     return;
   }
   $("sub").textContent = (data.host ? data.host + " · " : "") + "IO 超过 " + Math.round(data.threshold) + "% 会记下来";
@@ -635,7 +623,7 @@ function renderAlerts(data) {
     banner.textContent = "task_delayacct 未开启，IO 百分比一直是 0，超标名单不会增加。落盘读写的高峰仍会统计。";
   } else if (preview) {
     banner.className = "banner show info";
-    banner.textContent = "示例数据，不是这台机器的告警。";
+    banner.textContent = "示例数据，不是这台机器的记录。";
   } else {
     banner.className = "banner";
     banner.textContent = "";
@@ -651,7 +639,6 @@ function renderAlerts(data) {
   document.querySelectorAll("#thresholdRow button").forEach((btn) => {
     btn.classList.toggle("on", Number(btn.dataset.th) === Math.round(data.threshold));
   });
-  setBadge(data.open || 0);
   const minutes = data.minutes || [];
   fillBars($("ioBars"), minutes, (m) => m.max_io || 0, 100, (m) => fmtTime(m.t) + "  IO " + (m.max_io || 0).toFixed(1) + "%  " + (m.top_cmd || ""));
   const wmax = Math.max.apply(null, minutes.map((m) => m.max_write || 0).concat([1]));
@@ -717,7 +704,7 @@ document.querySelectorAll("#thresholdRow button").forEach((btn) => {
     }
     const range = dayBounds(selectedOffset);
     try {
-      const res = await fetch("/api/alerts?from=" + range.from + "&to=" + range.to + "&threshold=" + value, { cache: "no-store" });
+      const res = await fetch("/api/records?from=" + range.from + "&to=" + range.to + "&threshold=" + value, { cache: "no-store" });
       const data = await res.json();
       data.threshold = Number(value);
       renderAlerts(data);
@@ -730,7 +717,7 @@ async function tick() {
     if (preview) { renderAlerts(DEMO_ALERTS); return; }
     const range = dayBounds(selectedOffset);
     try {
-    const res = await fetch("/api/alerts?from=" + range.from + "&to=" + range.to, { cache: "no-store" });
+    const res = await fetch("/api/records?from=" + range.from + "&to=" + range.to, { cache: "no-store" });
       renderAlerts(await res.json());
     } catch (e) {
       renderAlerts({ ok: false, error: "连不上 iomon web。" });

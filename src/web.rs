@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::alerts::{AlertBook, ProcSnap};
+use crate::records::{AlertBook, ProcSnap};
 use crate::diskstats::{self, DiskStats};
 use crate::iotop::{IoFrame, ProcRate, ProcSampler};
 
@@ -72,7 +72,7 @@ iomon web —— 在浏览器里查看 IO
     -h, --help          显示本帮助
 
 页面上可以切换「仅活动 / 按进程」和搜索，不必重启。
-告警页在 /alerts，默认记下 IO 占比达到 20% 的进程，可在页面上改阈值。
+记录页在 /records，默认记下 IO 占比达到 20% 的进程，可在页面上改阈值。
 ";
 
 fn normalize_addr(raw: &str) -> Result<String, String> {
@@ -264,7 +264,7 @@ pub fn serve(opts: WebOptions) {
 
     let interval = opts.interval;
     let now = unix_now();
-    let book = AlertBook::open(crate::alerts::data_dir(), 20.0, now);
+    let book = AlertBook::open(crate::records::data_dir(), 20.0, now);
     let threshold = book.threshold;
     let published = Arc::new(Mutex::new(Hub {
         live: json_pending(),
@@ -313,14 +313,14 @@ fn handle(stream: &mut TcpStream, hub: &Mutex<Hub>) -> std::io::Result<()> {
         .unwrap_or("/");
     let path = raw.split('?').next().unwrap_or("/");
     match path {
-        "/" | "/index.html" | "/alerts" => {
+        "/" | "/index.html" | "/records" => {
             write_resp(stream, "200 OK", "text/html; charset=utf-8", PAGE.as_bytes())
         }
         "/api/live" => {
             let body = hub.lock().unwrap().live.clone();
             write_resp(stream, "200 OK", "application/json; charset=utf-8", body.as_bytes())
         }
-        "/api/alerts" => {
+        "/api/records" => {
             let mut guard = hub.lock().unwrap();
             if let Some(value) = query_param(raw, "threshold").and_then(|s| s.parse::<f64>().ok()) {
                 let value = value.clamp(1.0, 100.0);
