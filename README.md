@@ -36,10 +36,35 @@ Actual DISK READ:      8.00 K/s | Actual DISK WRITE:    512.00 K/s
 - **Total** = 全部线程差值求和（进程记账视角，写字节已减去 `cancelled_write_bytes`）。**Actual** = `/proc/vmstat` 的 `pgpgin`/`pgpgout` 差值，和 iotop 一样，不会把整盘和分区重复加总。
 - **PRIO** = IO 优先级（`ioprio_get`）。进程没调用过 `ionice` 时按调度策略和 nice 换算：普通进程是 `be/4`，`SCHED_FIFO`/`RR`（migration、watchdog）是 `rt/4`，高优先级内核线程（nice -20）是 `be/0`。
 - **IO>** / **SWAPIN** = 本间隔阻塞在磁盘 IO / 换入上的时间占比，数据来自 taskstats（纳秒），封顶 100%。需要 root 或 `CAP_NET_ADMIN`。没有该权限时 IO> 改用 `/proc/<tid>/stat` 的 blkio tick，SWAPIN 显示 `0.00 %`。
-- `kernel.task_delayacct=0`（Linux 5.15+ 的默认）时这两列恒为 0。开启：`echo 1 > /proc/sys/kernel/task_delayacct`（立即生效，重启后需再设；或写进 sysctl）。
+- `kernel.task_delayacct=0`（Linux 5.15+ 的默认）时这两列恒为 0。Ubuntu 宿主机上的开启命令见下文「开启 IO% / SWAPIN（Ubuntu）」。
 - 默认按线程显示全部条目（与 iotop 相同）。`-o` 只留有 IO 活动的，`-P` 按进程聚合，`-n N` 限制行数（终端下默认铺满一屏）。
 - 线程级计数读自 `/proc/<pid>/task/<tid>/io`（顶层 `/proc/<tid>/io` 是线程组聚合值，不能用来做线程级监控）。
 - 读取其他用户的线程需要 root；TTY 下整屏刷新，重定向到文件时自动改为顺序输出。
+
+## 开启 IO% / SWAPIN（Ubuntu）
+
+Linux 5.15 起 `kernel.task_delayacct` 默认关闭。没打开时，页面和 `iomon top` 的 IO、SWAPIN 会一直是 0。在 **Ubuntu 宿主机**上执行（不要在容器里执行；`sudo echo ... > 文件` 无效，重定向发生在 sudo 之前）：
+
+立刻生效：
+
+```bash
+echo 1 | sudo tee /proc/sys/kernel/task_delayacct
+```
+
+重启后仍然生效：
+
+```bash
+echo 'kernel.task_delayacct=1' | sudo tee /etc/sysctl.d/99-task-delayacct.conf
+sudo sysctl --system
+```
+
+网页上的提示是启动时读的，改完后重启容器才会消失：
+
+```bash
+docker compose restart
+```
+
+只有进程真的卡在磁盘上时，这两列才会大于 0。机器空闲时继续显示 0 是正常的。
 
 ## 构建与运行
 
