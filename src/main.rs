@@ -7,6 +7,7 @@ mod records;
 mod diskstats;
 mod ioprio;
 mod iotop;
+mod json;
 mod proc_io;
 mod syscall;
 mod taskstats;

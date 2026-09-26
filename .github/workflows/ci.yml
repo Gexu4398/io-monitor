@@ -27,3 +27,21 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: test
         run: cargo test
+
+  build-musl:
+    name: musl release build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      # musl 静态链接，产物可直接放进 scratch 镜像或拷到任意 Linux 发行版
+      - name: build
+        run: cargo build --release --target x86_64-unknown-linux-musl
+      - name: upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: iomon-x86_64-unknown-linux-musl
+          path: target/x86_64-unknown-linux-musl/release/iomon
+          if-no-files-found: error

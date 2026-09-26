@@ -8,6 +8,8 @@ use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
+use crate::json::{json_str, push_num};
+
 const RETAIN_SECS: u64 = 7 * 24 * 3600;
 const MAX_LIST: usize = 400;
 const MAX_OFFENDERS: usize = 500;
@@ -799,32 +801,6 @@ fn push_episode(out: &mut String, ep: &Episode) {
     out.push_str(",\"max_write\":");
     push_num(out, ep.max_write);
     out.push('}');
-}
-
-fn push_num(out: &mut String, n: f64) {
-    if !n.is_finite() {
-        out.push('0');
-    } else {
-        out.push_str(&format!("{:.4}", n));
-    }
-}
-
-fn json_str(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
 }
 
 #[cfg(test)]

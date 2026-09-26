@@ -704,7 +704,12 @@ document.querySelectorAll("#thresholdRow button").forEach((btn) => {
     }
     const range = dayBounds(selectedOffset);
     try {
-      const res = await fetch("/api/records?from=" + range.from + "&to=" + range.to + "&threshold=" + value, { cache: "no-store" });
+      const res = await fetch("/api/records?from=" + range.from + "&to=" + range.to, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: "threshold=" + encodeURIComponent(value),
+        cache: "no-store"
+      });
       const data = await res.json();
       data.threshold = Number(value);
       renderAlerts(data);

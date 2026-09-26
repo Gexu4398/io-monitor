@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::exit;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -14,9 +15,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crate::records::{AlertBook, ProcSnap};
 use crate::diskstats::{self, DiskStats};
 use crate::iotop::{IoFrame, ProcRate, ProcSampler};
+use crate::json::{json_str, push_num};
 
 const PAGE: &str = include_str!("assets/index.html");
 const ROW_LIMIT: usize = 200;
+/// 同时服务的连接上限；超出的连接直接关闭，避免线程无上限增长。
+const MAX_CONNECTIONS: usize = 64;
 
 pub struct WebOptions {
     pub addr: String,
@@ -219,7 +223,7 @@ fn sampler_loop(hub: Arc<Mutex<Hub>>, interval: f64) {
             0,
             "这台机器没有 /proc。采集只能在 Linux 上运行；页面本身可以用 ?preview=1 看布局。",
         );
-        hub.lock().unwrap().live = body;
+        hub.lock().unwrap_or_else(|e| e.into_inner()).live = body;
         return;
     }
     let host = hostname();
@@ -235,7 +239,7 @@ fn sampler_loop(hub: Arc<Mutex<Hub>>, interval: f64) {
             Vec::new()
         };
         seq = seq.wrapping_add(1);
-        let mut guard = hub.lock().unwrap();
+        let mut guard = hub.lock().unwrap_or_else(|e| e.into_inner());
         let threshold = guard.threshold;
         guard.book.set_threshold(threshold);
         if frame.ready {
@@ -283,14 +287,22 @@ pub fn serve(opts: WebOptions) {
     let worker = Arc::clone(&published);
     std::thread::spawn(move || sampler_loop(worker, interval));
 
+    let live = Arc::new(AtomicUsize::new(0));
     for conn in listener.incoming() {
         let mut stream = match conn {
             Ok(s) => s,
             Err(_) => continue,
         };
+        if live.load(Ordering::Relaxed) >= MAX_CONNECTIONS {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+            continue;
+        }
+        live.fetch_add(1, Ordering::Relaxed);
         let published = Arc::clone(&published);
+        let counter = Arc::clone(&live);
         std::thread::spawn(move || {
             let _ = handle(&mut stream, &published);
+            counter.fetch_sub(1, Ordering::Relaxed);
         });
     }
 }
@@ -307,28 +319,64 @@ fn browse_hint(addr: &str) -> String {
 fn handle(stream: &mut TcpStream, hub: &Mutex<Hub>) -> std::io::Result<()> {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(3)));
-    let mut buf = [0u8; 4096];
-    let n = stream.read(&mut buf).unwrap_or(0);
-    let req = String::from_utf8_lossy(&buf[..n]);
-    let raw = req
+    let mut buf = Vec::with_capacity(1024);
+    let mut chunk = [0u8; 4096];
+    // 先读出完整请求头，再按 Content-Length 把 body 读完
+    loop {
+        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+            break;
+        }
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(k) => buf.extend_from_slice(&chunk[..k]),
+            Err(_) => break,
+        }
+        if buf.len() > 64 * 1024 {
+            break;
+        }
+    }
+    if let Some(header_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+        let head = String::from_utf8_lossy(&buf[..header_end]).to_string();
+        let want = content_length(&head).unwrap_or(0);
+        while buf.len() < header_end + 4 + want {
+            match stream.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(k) => buf.extend_from_slice(&chunk[..k]),
+            }
+        }
+    }
+    let req = String::from_utf8_lossy(&buf);
+    let mut parts = req
         .lines()
         .next()
         .unwrap_or("")
-        .split_whitespace()
-        .nth(1)
-        .unwrap_or("/");
+        .split_whitespace();
+    let method = parts.next().unwrap_or("GET");
+    let raw = parts.next().unwrap_or("/");
     let path = raw.split('?').next().unwrap_or("/");
     match path {
         "/" | "/index.html" | "/records" => {
             write_resp(stream, "200 OK", "text/html; charset=utf-8", PAGE.as_bytes())
         }
         "/api/live" => {
-            let body = hub.lock().unwrap().live.clone();
+            let guard = lock_hub(hub);
+            let body = guard.live.clone();
             write_resp(stream, "200 OK", "application/json; charset=utf-8", body.as_bytes())
         }
         "/api/records" => {
-            let mut guard = hub.lock().unwrap();
-            if let Some(value) = query_param(raw, "threshold").and_then(|s| s.parse::<f64>().ok()) {
+            let mut guard = lock_hub(hub);
+            // 改阈值是写操作，只接受 POST；GET 带着阈值参数一律拒绝，
+            // 避免被浏览器预取或爬虫误触发
+            if method != "POST" {
+                if query_param(raw, "threshold").is_some() {
+                    return write_resp(
+                        stream,
+                        "405 Method Not Allowed",
+                        "text/plain; charset=utf-8",
+                        b"use POST to change threshold",
+                    );
+                }
+            } else if let Some(value) = body_param(&req, "threshold").and_then(|s| s.parse::<f64>().ok()) {
                 let value = value.clamp(1.0, 100.0);
                 guard.threshold = value;
                 guard.book.set_threshold(value);
@@ -344,12 +392,38 @@ fn handle(stream: &mut TcpStream, hub: &Mutex<Hub>) -> std::io::Result<()> {
     }
 }
 
+/// 持锁线程 panic 后 Mutex 会中毒，这里恢复数据继续用，不让整个服务连锁倒下。
+fn lock_hub(hub: &Mutex<Hub>) -> std::sync::MutexGuard<'_, Hub> {
+    hub.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// 从请求体（形如 `threshold=20`）取参数。只支持前端实际发送的简单格式。
+fn body_param(req: &str, key: &str) -> Option<String> {
+    let body = req.split_once("\r\n\r\n")?.1;
+    for part in body.split('&') {
+        let (name, value) = part.split_once('=').unwrap_or((part, ""));
+        if name.trim() == key {
+            return Some(value.trim().to_string());
+        }
+    }
+    None
+}
+
 fn query_param(raw: &str, key: &str) -> Option<String> {
     let query = raw.split_once('?')?.1;
     for part in query.split('&') {
         let (name, value) = part.split_once('=').unwrap_or((part, ""));
         if name == key {
             return Some(value.to_string());
+        }
+    }
+    None
+}
+
+fn content_length(head: &str) -> Option<usize> {
+    for line in head.lines() {
+        if let Some(rest) = line.strip_prefix("Content-Length:").or_else(|| line.strip_prefix("content-length:")) {
+            return rest.trim().parse().ok();
         }
     }
     None
@@ -462,32 +536,6 @@ fn json_frame(
     out
 }
 
-fn push_num(out: &mut String, n: f64) {
-    if !n.is_finite() {
-        out.push('0');
-    } else {
-        out.push_str(&format!("{:.4}", n));
-    }
-}
-
-fn json_str(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -513,5 +561,19 @@ mod tests {
         let s = json_error(3, "x");
         assert!(s.contains("\"ok\":false"));
         assert!(s.contains("\"seq\":3"));
+    }
+
+    #[test]
+    fn body_param_finds_threshold() {
+        let req = "POST /api/records HTTP/1.1\r\nContent-Length: 13\r\n\r\nthreshold=20";
+        assert_eq!(body_param(req, "threshold").as_deref(), Some("20"));
+        assert_eq!(body_param(req, "missing"), None);
+    }
+
+    #[test]
+    fn content_length_parsed() {
+        let head = "POST /api/records HTTP/1.1\r\nContent-Length: 13\r\nHost: x";
+        assert_eq!(content_length(head), Some(13));
+        assert_eq!(content_length("GET / HTTP/1.1\r\nHost: x"), None);
     }
 }
