@@ -301,6 +301,9 @@ pub fn serve(opts: WebOptions) {
         let published = Arc::clone(&published);
         let counter = Arc::clone(&live);
         std::thread::spawn(move || {
+            // 读写各 3 秒超时，慢客户端占不满连接上限
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
+            let _ = stream.set_write_timeout(Some(Duration::from_secs(3)));
             let _ = handle(&mut stream, &published);
             counter.fetch_sub(1, Ordering::Relaxed);
         });
@@ -317,44 +320,10 @@ fn browse_hint(addr: &str) -> String {
 }
 
 fn handle(stream: &mut TcpStream, hub: &Mutex<Hub>) -> std::io::Result<()> {
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(3)));
-    let mut buf = Vec::with_capacity(1024);
-    let mut chunk = [0u8; 4096];
-    // 先读出完整请求头，再按 Content-Length 把 body 读完
-    loop {
-        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
-            break;
-        }
-        match stream.read(&mut chunk) {
-            Ok(0) => break,
-            Ok(k) => buf.extend_from_slice(&chunk[..k]),
-            Err(_) => break,
-        }
-        if buf.len() > 64 * 1024 {
-            break;
-        }
-    }
-    if let Some(header_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-        let head = String::from_utf8_lossy(&buf[..header_end]).to_string();
-        let want = content_length(&head).unwrap_or(0);
-        while buf.len() < header_end + 4 + want {
-            match stream.read(&mut chunk) {
-                Ok(0) | Err(_) => break,
-                Ok(k) => buf.extend_from_slice(&chunk[..k]),
-            }
-        }
-    }
-    let req = String::from_utf8_lossy(&buf);
-    let mut parts = req
-        .lines()
-        .next()
-        .unwrap_or("")
-        .split_whitespace();
-    let method = parts.next().unwrap_or("GET");
-    let raw = parts.next().unwrap_or("/");
-    let path = raw.split('?').next().unwrap_or("/");
-    match path {
+    let Some(req) = read_request(stream) else {
+        return write_resp(stream, "400 Bad Request", "text/plain; charset=utf-8", b"bad request");
+    };
+    match req.path.as_str() {
         "/" | "/index.html" | "/records" => {
             write_resp(stream, "200 OK", "text/html; charset=utf-8", PAGE.as_bytes())
         }
@@ -363,33 +332,86 @@ fn handle(stream: &mut TcpStream, hub: &Mutex<Hub>) -> std::io::Result<()> {
             let body = guard.live.clone();
             write_resp(stream, "200 OK", "application/json; charset=utf-8", body.as_bytes())
         }
-        "/api/records" => {
-            let mut guard = lock_hub(hub);
-            // 改阈值是写操作，只接受 POST；GET 带着阈值参数一律拒绝，
-            // 避免被浏览器预取或爬虫误触发
-            if method != "POST" {
-                if query_param(raw, "threshold").is_some() {
-                    return write_resp(
-                        stream,
-                        "405 Method Not Allowed",
-                        "text/plain; charset=utf-8",
-                        b"use POST to change threshold",
-                    );
-                }
-            } else if let Some(value) = body_param(&req, "threshold").and_then(|s| s.parse::<f64>().ok()) {
-                let value = value.clamp(1.0, 100.0);
-                guard.threshold = value;
-                guard.book.set_threshold(value);
-            }
-            let now = unix_now();
-            let from = query_param(raw, "from").and_then(|s| s.parse().ok()).unwrap_or(0);
-            let to = query_param(raw, "to").and_then(|s| s.parse().ok()).unwrap_or(0);
-            let body = guard.book.to_json(guard.delayacct, &guard.host, guard.interval, now, from, to);
-            drop(guard);
-            write_resp(stream, "200 OK", "application/json; charset=utf-8", body.as_bytes())
-        }
+        "/api/records" => records_response(stream, hub, &req),
         _ => write_resp(stream, "404 Not Found", "text/plain; charset=utf-8", b"not found"),
     }
+}
+
+/// 一次已解析的 HTTP 请求。解析（read_request）与分发（handle）分离，
+/// 后续加端点只需在 handle 的 match 里加一支，再给端点一个独立函数。
+struct Request {
+    method: String,
+    /// 请求行里的目标，含 query，如 /api/records?from=1&to=2
+    raw: String,
+    /// 去掉 query 后的路径
+    path: String,
+    /// 请求体（lossy 解码即可：本服务只接收 urlencoded 的小表单）
+    body: String,
+}
+
+/// 读完一个请求：头部读到 \r\n\r\n（上限 64KB），body 按 Content-Length 补齐。
+/// 头部超限、读取出错或客户端不发完整请求（端口扫描之类）都返回 None。
+fn read_request(stream: &mut TcpStream) -> Option<Request> {
+    let mut buf = Vec::with_capacity(1024);
+    let mut chunk = [0u8; 4096];
+    loop {
+        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+            break;
+        }
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(k) => buf.extend_from_slice(&chunk[..k]),
+            Err(_) => return None,
+        }
+        if buf.len() > 64 * 1024 {
+            return None;
+        }
+    }
+    let header_end = buf.windows(4).position(|w| w == b"\r\n\r\n")?;
+    let head = String::from_utf8_lossy(&buf[..header_end]).to_string();
+    let want = content_length(&head).unwrap_or(0);
+    // body 允许不完整：对端提前断开就用手上已有的部分
+    while buf.len() < header_end + 4 + want {
+        match stream.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(k) => buf.extend_from_slice(&chunk[..k]),
+        }
+    }
+    let body = buf
+        .get(header_end + 4..)
+        .map(|b| String::from_utf8_lossy(b).to_string())
+        .unwrap_or_default();
+    let mut parts = head.lines().next().unwrap_or("").split_whitespace();
+    let method = parts.next().unwrap_or("GET").to_string();
+    let raw = parts.next().unwrap_or("/").to_string();
+    let path = raw.split('?').next().unwrap_or("/").to_string();
+    Some(Request { method, raw, path, body })
+}
+
+/// /api/records：GET 查询；改阈值是写操作，只接受 POST（body 传 threshold），
+/// GET 带 threshold 一律 405，避免被浏览器预取或爬虫误触发。
+fn records_response(stream: &mut TcpStream, hub: &Mutex<Hub>, req: &Request) -> std::io::Result<()> {
+    let mut guard = lock_hub(hub);
+    if req.method != "POST" {
+        if query_param(&req.raw, "threshold").is_some() {
+            return write_resp(
+                stream,
+                "405 Method Not Allowed",
+                "text/plain; charset=utf-8",
+                b"use POST to change threshold",
+            );
+        }
+    } else if let Some(value) = body_param(&req.body, "threshold").and_then(|s| s.parse::<f64>().ok()) {
+        let value = value.clamp(1.0, 100.0);
+        guard.threshold = value;
+        guard.book.set_threshold(value);
+    }
+    let now = unix_now();
+    let from = query_param(&req.raw, "from").and_then(|s| s.parse().ok()).unwrap_or(0);
+    let to = query_param(&req.raw, "to").and_then(|s| s.parse().ok()).unwrap_or(0);
+    let body = guard.book.to_json(guard.delayacct, &guard.host, guard.interval, now, from, to);
+    drop(guard);
+    write_resp(stream, "200 OK", "application/json; charset=utf-8", body.as_bytes())
 }
 
 /// 持锁线程 panic 后 Mutex 会中毒，这里恢复数据继续用，不让整个服务连锁倒下。
@@ -398,8 +420,7 @@ fn lock_hub(hub: &Mutex<Hub>) -> std::sync::MutexGuard<'_, Hub> {
 }
 
 /// 从请求体（形如 `threshold=20`）取参数。只支持前端实际发送的简单格式。
-fn body_param(req: &str, key: &str) -> Option<String> {
-    let body = req.split_once("\r\n\r\n")?.1;
+fn body_param(body: &str, key: &str) -> Option<String> {
     for part in body.split('&') {
         let (name, value) = part.split_once('=').unwrap_or((part, ""));
         if name.trim() == key {
@@ -565,9 +586,9 @@ mod tests {
 
     #[test]
     fn body_param_finds_threshold() {
-        let req = "POST /api/records HTTP/1.1\r\nContent-Length: 13\r\n\r\nthreshold=20";
-        assert_eq!(body_param(req, "threshold").as_deref(), Some("20"));
-        assert_eq!(body_param(req, "missing"), None);
+        assert_eq!(body_param("threshold=20", "threshold").as_deref(), Some("20"));
+        assert_eq!(body_param("a=1&threshold=50", "threshold").as_deref(), Some("50"));
+        assert_eq!(body_param("x=1", "missing"), None);
     }
 
     #[test]

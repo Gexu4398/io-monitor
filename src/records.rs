@@ -2,6 +2,12 @@
 //!
 //! 某一秒超过阈值就记一条，不要求持续。连续超标会并成一段，避免同一进程每秒一条。
 //! 记录按天写在磁盘上，超过 7 天的文件删掉。目录由环境变量 IOMON_DATA 指定。
+//!
+//! 时间有三种口径，职责如下（改动过期或分片逻辑前先看这里）：
+//! - 记录时间戳（unix 秒）：episode/minute 的业务时间，内存 retain 与页面查询只看它；
+//! - 文件名（UTC 天）：纯粹的物理分片名，不参与过期判断，与本地时区的「天」无关；
+//! - 文件 mtime：唯一的过期判据。它不早于文件内任何一条记录的落盘时刻，
+//!   因此含 7 天内数据的文件必然不会被 purge 误删。
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::{self, OpenOptions};
@@ -587,13 +593,20 @@ impl AlertBook {
 
     fn purge_files(&self, now: u64) {
         let Some(dir) = &self.dir else { return };
-        let cutoff = ymd(now.saturating_sub(RETAIN_SECS));
+        let cutoff = now.saturating_sub(RETAIN_SECS);
         for folder in ["episodes", "minutes"] {
             let Ok(rd) = fs::read_dir(dir.join(folder)) else { continue };
             for entry in rd.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                let day = name.trim_end_matches(".jsonl");
-                if day.len() == 10 && day < cutoff.as_str() {
+                // 按最后写入时间判断过期：文件名里的日期是 UTC 切的，
+                // 和本地时区「保留 7 天」的语义会差几个小时
+                let Ok(meta) = entry.metadata() else { continue };
+                let modified = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(u64::MAX);
+                if modified < cutoff {
                     let _ = fs::remove_file(entry.path());
                 }
             }
@@ -671,96 +684,62 @@ fn civil_from_days(z: i64) -> (i32, u32, u32) {
     (y as i32, m as u32, d as u32)
 }
 
+/// 一行落盘 JSON 解析出的键值对（json::parse_object 保证语法正确）。
+/// 取值时类型对不上返回 None，整行由调用方丢弃。
+struct Fields(Vec<(String, crate::json::Value)>);
+
+impl Fields {
+    fn new(line: &str) -> Option<Self> {
+        Some(Self(crate::json::parse_object(line)?))
+    }
+
+    fn str(&self, key: &str) -> Option<String> {
+        self.0.iter().find(|(k, _)| k == key).and_then(|(_, v)| match v {
+            crate::json::Value::Str(s) => Some(s.clone()),
+            _ => None,
+        })
+    }
+
+    fn num(&self, key: &str) -> Option<f64> {
+        self.0.iter().find(|(k, _)| k == key).and_then(|(_, v)| match v {
+            crate::json::Value::Num(n) => Some(*n),
+            _ => None,
+        })
+    }
+}
+
 fn parse_episode(line: &str) -> Option<Episode> {
+    let f = Fields::new(line)?;
     Some(Episode {
-        pid: num_u32(line, "pid")?,
-        user: json_unescape(&str_field(line, "user")?),
-        command: json_unescape(&str_field(line, "command")?),
-        start: num_u64(line, "start")?,
-        end: num_u64(line, "end")?,
-        samples: num_u32(line, "samples").unwrap_or(1),
-        over_s: num_f64(line, "over_s").unwrap_or(1.0),
-        max_io: num_f64(line, "max_io")?,
-        last_io: num_f64(line, "last_io").unwrap_or(0.0),
-        max_read: num_f64(line, "max_read").unwrap_or(0.0),
-        max_write: num_f64(line, "max_write").unwrap_or(0.0),
+        pid: f.num("pid")? as u32,
+        user: f.str("user")?,
+        command: f.str("command")?,
+        start: f.num("start")? as u64,
+        end: f.num("end")? as u64,
+        samples: f.num("samples").map(|n| n as u32).unwrap_or(1),
+        over_s: f.num("over_s").unwrap_or(1.0),
+        max_io: f.num("max_io")?,
+        last_io: f.num("last_io").unwrap_or(0.0),
+        max_read: f.num("max_read").unwrap_or(0.0),
+        max_write: f.num("max_write").unwrap_or(0.0),
         open: false,
     })
 }
 
 fn parse_minute(line: &str) -> Option<Minute> {
+    let f = Fields::new(line)?;
     Some(Minute {
-        bucket: num_u64(line, "bucket")?,
-        max_io: num_f64(line, "max_io").unwrap_or(0.0),
-        max_read: num_f64(line, "max_read").unwrap_or(0.0),
-        max_write: num_f64(line, "max_write").unwrap_or(0.0),
-        over: num_u32(line, "over").unwrap_or(0),
-        top_io: num_f64(line, "top_io").unwrap_or(0.0),
-        top_cmd: json_unescape(&str_field(line, "top_cmd").unwrap_or_default()),
-        top_pid: num_u32(line, "top_pid").unwrap_or(0),
+        bucket: f.num("bucket")? as u64,
+        max_io: f.num("max_io").unwrap_or(0.0),
+        max_read: f.num("max_read").unwrap_or(0.0),
+        max_write: f.num("max_write").unwrap_or(0.0),
+        over: f.num("over").map(|n| n as u32).unwrap_or(0),
+        top_io: f.num("top_io").unwrap_or(0.0),
+        top_cmd: f.str("top_cmd").unwrap_or_default(),
+        top_pid: f.num("top_pid").map(|n| n as u32).unwrap_or(0),
     })
 }
 
-fn raw_field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
-    let pat = format!("\"{key}\":");
-    let idx = line.find(&pat)?;
-    let rest = line[idx + pat.len()..].trim_start();
-    if rest.starts_with('"') {
-        let bytes = rest.as_bytes();
-        let mut i = 1;
-        while i < bytes.len() {
-            if bytes[i] == b'\\' {
-                i += 2;
-                continue;
-            }
-            if bytes[i] == b'"' {
-                return Some(&rest[1..i]);
-            }
-            i += 1;
-        }
-        None
-    } else {
-        let end = rest.find([',', '}']).unwrap_or(rest.len());
-        Some(rest[..end].trim())
-    }
-}
-
-fn str_field(line: &str, key: &str) -> Option<String> {
-    raw_field(line, key).map(|s| s.to_string())
-}
-
-fn num_f64(line: &str, key: &str) -> Option<f64> {
-    raw_field(line, key)?.parse().ok()
-}
-
-fn num_u64(line: &str, key: &str) -> Option<u64> {
-    Some(num_f64(line, key)? as u64)
-}
-
-fn num_u32(line: &str, key: &str) -> Option<u32> {
-    Some(num_f64(line, key)? as u32)
-}
-
-fn json_unescape(s: &str) -> String {
-    let mut out = String::new();
-    let mut chars = s.chars();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            match chars.next() {
-                Some('"') => out.push('"'),
-                Some('\\') => out.push('\\'),
-                Some('n') => out.push('\n'),
-                Some('r') => out.push('\r'),
-                Some('t') => out.push('\t'),
-                Some(other) => out.push(other),
-                None => {}
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
 
 pub fn data_dir() -> PathBuf {
     std::env::var("IOMON_DATA")
@@ -860,5 +839,69 @@ mod tests {
     #[test]
     fn unix_day_is_utc_date() {
         assert_eq!(ymd(0), "1970-01-01");
+    }
+
+    #[test]
+    fn purge_by_mtime_keeps_fresh_files() {
+        let dir = std::env::temp_dir().join(format!("iomon-purge-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let now = 1_700_000_000u64;
+        fs::create_dir_all(dir.join("episodes")).unwrap();
+        // 新写入的文件（mtime 为当前真实时间）即使文件名是很久以前的日期也不该被删
+        let stale_name = dir.join("episodes/2020-01-01.jsonl");
+        fs::write(&stale_name, "{}\n").unwrap();
+        // open() 内部会跑 purge：按 mtime 判断，刚写入的文件不该被删
+        let _ = AlertBook::open(dir.clone(), 20.0, now);
+        assert!(stale_name.exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 落盘格式的不变量测试：episode/minute 经过 json_str 写出、
+    /// json::parse_object + Fields 读回后逐字段相等。字段值故意选最恶劣的组合
+    /// （引号、反斜杠、换行、控制字符、中文、以及长得像 `"pid":` 的伪字段）。
+    /// 写端（push_episode/minute_line）与读端（parse_episode/parse_minute）任何一侧
+    /// 改动导致不再对称，这个测试都会红。
+    #[test]
+    fn episode_and_minute_survive_disk_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("iomon-roundtrip-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let now = 1_700_000_000u64;
+        let snap = ProcSnap {
+            pid: 31415,
+            user: "ro\"ot\\1000\n".into(),
+            command: "py\"thon -c 'x = {\"pid\": 1}' 中文\u{1}换行\n".into(),
+            io: 88.5,
+            read: 4096.0,
+            write: 1_048_576.0,
+        };
+        let mut book = AlertBook::open(dir.clone(), 20.0, now);
+        book.ingest(now, 1.0, 2e6, 3e6, std::slice::from_ref(&snap));
+        book.ingest(now + 1, 1.0, 0.0, 0.0, &[]); // 下一帧无超标，episode 关闭并落盘
+
+        let again = AlertBook::open(dir.clone(), 20.0, now + 10);
+        assert_eq!(again.closed.len(), 1);
+        let ep = &again.closed[0];
+        assert_eq!(ep.pid, 31415);
+        assert_eq!(ep.user, "ro\"ot\\1000\n");
+        assert_eq!(ep.command, "py\"thon -c 'x = {\"pid\": 1}' 中文\u{1}换行\n");
+        assert_eq!(ep.start, now);
+        assert_eq!(ep.end, now + 1);
+        assert_eq!(ep.samples, 1);
+        assert!((ep.over_s - 1.0).abs() < 1e-9);
+        assert!((ep.max_io - 88.5).abs() < 1e-6);
+        assert!((ep.last_io - 88.5).abs() < 1e-6);
+        assert!((ep.max_read - 4096.0).abs() < 1e-9);
+        assert!((ep.max_write - 1_048_576.0).abs() < 1e-9);
+
+        // minute 走同一条 json_str/minute_line -> parse_minute 链路
+        assert_eq!(again.minutes.len(), 1);
+        let m = &again.minutes[0];
+        assert_eq!(m.bucket, now / 60);
+        assert_eq!(m.top_cmd, snap.command);
+        assert_eq!(m.top_pid, 31415);
+        assert!((m.max_io - 88.5).abs() < 1e-6);
+        assert!((m.max_write - 3e6).abs() < 1.0);
+        assert_eq!(m.over, 1);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

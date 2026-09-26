@@ -1,0 +1,25 @@
+# 换行策略：文本文件在仓库和工作区统一为 LF。
+# 项目目标是 Linux（/proc），CI、Docker、WSL 构建都以 LF 为准；
+# 同时消除 Windows 上 core.autocrlf 引发的
+# "LF will be replaced by CRLF the next time Git touches it" 噪音。
+* text=auto eol=lf
+
+# 无扩展名的文件显式声明为文本，确保参与规范化
+Dockerfile     text
+LICENSE        text
+.gitignore     text
+.dockerignore  text
+.gitattributes text
+
+# Windows 专属脚本保留 CRLF（当前仓库没有，将来添加时自动生效）
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# 二进制文件不做任何换行转换
+*.png  binary
+*.jpg  binary
+*.gif  binary
+*.ico  binary
+*.woff binary
+*.woff2 binary
