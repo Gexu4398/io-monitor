@@ -106,10 +106,11 @@ iomon top -o 1             # 每 1 秒，只看有 IO 的线程
 iomon top -P 1             # 每 1 秒，按进程聚合
 iomon top -n 40 5 12       # 最多 40 行，5 秒一次共 12 次
 iomon web                  # 浏览器打开 http://127.0.0.1:8080
-iomon web 2 -l 9090        # 每 2 秒采样，监听 9090
+iomon web 2 -l 9090        # 每 2 秒采样，监听本机 9090
+iomon web -l 0.0.0.0:8080  # 显式绑全部网卡，供局域网访问
 ```
 
-`iomon web` 提供实时视图和记录页 `/records`。记录按进程记：某一秒 IO 占比达到阈值（默认 20%）就会留下一条，不必持续。历史写在 `deploy/records`，保留 7 天，更早的自动删掉。页面上可以改阈值、按天查看。Docker Compose 默认就是这个命令，映射宿主机 8080 端口。
+`iomon web` 提供实时视图和记录页 `/records`。默认只监听 `127.0.0.1`（`-l` 只写端口时同样只绑本机）；要对外访问需写全地址（如 `-l 0.0.0.0:8080`）。记录按进程记：某一秒 IO 占比达到阈值（默认 20%）就会留下一条，不必持续。历史写在 `deploy/records`，保留 7 天，更早的自动删掉。页面上可以改阈值、按天查看。Docker Compose 已配好 `-l 0.0.0.0:8080`，映射宿主机 8080 端口。页面会显示全部进程的命令行，对局域网开放前请自行加防火墙或反向代理认证。
 
 输出示例：
 
@@ -136,7 +137,7 @@ sda            12.3     45.6        512.0     2048.0     0.05     1.23     3.4
 
 ## Docker 运行（可选）
 
-项目自带 `Dockerfile`（musl 静态二进制 + scratch，镜像约 750KB）与 `docker-compose.yaml`
+项目自带 `Dockerfile`（musl 静态二进制 + scratch，镜像约 1.3MB）与 `docker-compose.yaml`
 （已配好 `pid: host`、`SYS_PTRACE`、`NET_ADMIN`，并挂载宿主机 `/etc/passwd` 供 top 视图解析用户名）。
 `NET_ADMIN` 用来查询 taskstats（SWAPIN / IO%）。compose 按 Ubuntu 默认写了
 `apparmor:unconfined`，否则 AppArmor 会拒绝读取宿主机其他进程：

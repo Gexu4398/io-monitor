@@ -4,6 +4,7 @@
 # 交互式带参数:   docker compose run --rm iomon 1 -d vda
 # 监控宿主机进程: docker compose run --rm iomon -p <宿主机PID>
 # 浏览器查看:    docker compose up -d    然后打开 http://宿主机:8080
+#               端口对局域网开放会暴露全部进程的命令行，请自行加防火墙或反代认证
 # 后台日志:      docker compose logs -f iomon
 
 services:
@@ -27,8 +28,9 @@ services:
     security_opt:
       - apparmor:unconfined
 
-    # 浏览器查看页。docker compose run iomon top 仍会改去跑命令行。
-    command: ["web"]
+    # 浏览器查看页。iomon 默认只绑 127.0.0.1，容器里要映射到宿主机
+    # 必须显式绑 0.0.0.0；docker compose run iomon top 仍会改去跑命令行。
+    command: ["web", "-l", "0.0.0.0:8080"]
     ports:
       - "8080:8080"
 

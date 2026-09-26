@@ -71,7 +71,7 @@ mod tests {
     #[test]
     fn explicit_ioprio_wins_over_nice() {
         // ionice -c2 -n0：类别 BE=2，级别 0，即使 nice 是 0 也显示 be/0。
-        assert_eq!(format_ioprio(Some((2 << 13) | 0), 0, 0), "be/0");
+        assert_eq!(format_ioprio(Some(2 << 13), 0, 0), "be/0");
         assert_eq!(format_ioprio(Some(3 << 13), 0, 0), "idle");
         assert_eq!(format_ioprio(Some((1 << 13) | 4), 0, 0), "rt/4");
     }

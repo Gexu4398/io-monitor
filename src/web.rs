@@ -25,7 +25,7 @@ pub struct WebOptions {
 
 pub fn parse_args(args: &[String]) -> Result<WebOptions, String> {
     let mut opts = WebOptions {
-        addr: "0.0.0.0:8080".to_string(),
+        addr: "127.0.0.1:8080".to_string(),
         interval: 1.0,
     };
     let mut positional = Vec::new();
@@ -65,24 +65,30 @@ iomon web —— 在浏览器里查看 IO
 用法:
     iomon web [间隔秒数] [-l 地址]
 
-默认监听 0.0.0.0:8080，采样间隔 1 秒。打开 http://127.0.0.1:8080
+默认监听 127.0.0.1:8080（只有本机能访问），采样间隔 1 秒。
+打开 http://127.0.0.1:8080
 
 选项:
-    -l, --listen ADDR   监听地址，如 127.0.0.1:9090，或只写端口 9090
+    -l, --listen ADDR   监听地址。只写端口（如 9090）同样只绑本机；
+                        要让局域网访问需写全地址，如 0.0.0.0:8080
     -h, --help          显示本帮助
 
 页面上可以切换「仅活动 / 按进程」和搜索，不必重启。
 记录页在 /records，默认记下 IO 占比达到 20% 的进程，可在页面上改阈值。
+
+页面会显示全部进程的命令行，请勿在没有防火墙或反向代理认证的
+情况下暴露到不可信网络。
 ";
 
 fn normalize_addr(raw: &str) -> Result<String, String> {
+    // 只写端口的缩写形式一律只绑本机；要对外监听必须写全地址。
     if let Some(port) = raw.strip_prefix(':') {
         parse_port(port)?;
-        return Ok(format!("0.0.0.0:{}", port));
+        return Ok(format!("127.0.0.1:{}", port));
     }
     if !raw.contains(':') && raw.chars().all(|c| c.is_ascii_digit()) {
         parse_port(raw)?;
-        return Ok(format!("0.0.0.0:{}", raw));
+        return Ok(format!("127.0.0.1:{}", raw));
     }
     let (host, port) = raw
         .rsplit_once(':')
@@ -494,9 +500,10 @@ mod tests {
 
     #[test]
     fn listen_addr_forms() {
-        assert_eq!(normalize_addr("9090").unwrap(), "0.0.0.0:9090");
-        assert_eq!(normalize_addr(":9090").unwrap(), "0.0.0.0:9090");
+        assert_eq!(normalize_addr("9090").unwrap(), "127.0.0.1:9090");
+        assert_eq!(normalize_addr(":9090").unwrap(), "127.0.0.1:9090");
         assert_eq!(normalize_addr("127.0.0.1:9090").unwrap(), "127.0.0.1:9090");
+        assert_eq!(normalize_addr("0.0.0.0:9090").unwrap(), "0.0.0.0:9090");
         assert!(normalize_addr("127.0.0.1").is_err());
         assert!(normalize_addr("0").is_err());
     }

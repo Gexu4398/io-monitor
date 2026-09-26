@@ -178,6 +178,7 @@ mod tests {
         assert!(parse_line("8 0 sda x 0 0 0 0 0 0 0 0 0 0").is_err());
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn stats(
         reads: u64,
         sect_r: u64,

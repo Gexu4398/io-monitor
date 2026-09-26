@@ -1,4 +1,5 @@
 /target
+/target-wsl
 .idea
 deploy/images/
 deploy/records/

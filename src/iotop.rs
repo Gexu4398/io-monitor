@@ -199,7 +199,8 @@ fn scan(per_process: bool, ts: &mut Option<Taskstats>) -> Scan {
 
 /// 延迟纳秒占采样时长的百分比。iotop 用 delta/(秒*1e7) 并封顶 100。
 fn delay_pct(delta_ns: u64, elapsed_s: f64) -> f64 {
-    if !(elapsed_s > 0.0) {
+    // NaN 或非正的间隔都按 0 处理（等价于 !(elapsed_s > 0.0)），避免除出 inf。
+    if elapsed_s.is_nan() || elapsed_s <= 0.0 {
         return 0.0;
     }
     (delta_ns as f64 / (elapsed_s * 10_000_000.0)).min(100.0)

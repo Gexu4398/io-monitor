@@ -263,6 +263,7 @@ impl AlertBook {
         self.offenders.retain(|pid, _| keep.contains(pid) || self.open.contains_key(pid));
     }
 
+    #[allow(clippy::too_many_arguments)] // 单次采样的记帐入参，打包成 struct 反而难读
     fn note_minute(&mut self, now: u64, top_io: f64, top_cmd: String, top_pid: u32, actual_read: f64, actual_write: f64, over: bool) {
         let bucket = now / 60;
         let same = self.minutes.back().map(|m| m.bucket == bucket).unwrap_or(false);
@@ -556,9 +557,10 @@ impl AlertBook {
         self.minutes = minutes.into_iter().collect();
     }
 
+    // map_while：读取中途出错时停止，而不是在 Err 上无限迭代
     fn load_episode_file(&mut self, path: &Path, cutoff: u64) {
         let Ok(file) = fs::File::open(path) else { return };
-        for line in BufReader::new(file).lines().flatten() {
+        for line in BufReader::new(file).lines().map_while(Result::ok) {
             if let Some(ep) = parse_episode(&line) {
                 if ep.end >= cutoff {
                     self.closed.push_back(ep);
@@ -569,7 +571,7 @@ impl AlertBook {
 
     fn load_minute_file(&self, path: &Path, cutoff: u64, into: &mut HashMap<u64, Minute>) {
         let Ok(file) = fs::File::open(path) else { return };
-        for line in BufReader::new(file).lines().flatten() {
+        for line in BufReader::new(file).lines().map_while(Result::ok) {
             if let Some(minute) = parse_minute(&line) {
                 if minute.bucket.saturating_mul(60).saturating_add(60) <= cutoff {
                     continue;
