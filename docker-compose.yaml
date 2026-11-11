@@ -31,6 +31,10 @@ services:
     # 浏览器查看页。iomon 默认只绑 127.0.0.1，容器里要映射到宿主机
     # 必须显式绑 0.0.0.0；docker compose run iomon top 仍会改去跑命令行。
     command: ["web", "-l", "0.0.0.0:8080"]
+
+    # CentOS 7 等旧内核的 TASKSTATS 只在初始网络命名空间可见，bridge 网络里
+    # 页面会提示"taskstats 不可用 (errno 2)"、进程级门控停用。遇到时改用：
+    # network_mode: host      # 并删除下面的 ports 映射
     ports:
       - "8080:8080"
 

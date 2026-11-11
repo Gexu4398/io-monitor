@@ -180,8 +180,13 @@ fn family_id(fd: i32, buf: &mut [u8]) -> Result<u16, String> {
     syscall::send_netlink(fd, &req).map_err(|e| format!("netlink 发送失败 (errno {e})"))?;
     let n = syscall::recv_netlink(fd, buf).map_err(|e| format!("netlink 接收失败 (errno {e})"))?;
     if let Some(err) = nl_errno(&buf[..n]) {
-        // ENOENT(2)：内核没有 TASKSTATS 族（未编译或模块未加载）
-        return Err(format!("内核拒绝 TASKSTATS 族查询 (errno {err})"));
+        return Err(if err == 2 {
+            // 旧内核（如 CentOS 7）的 TASKSTATS 族只在初始网络命名空间可见，
+            // 容器默认 bridge 网络里查询就是这个错；改 network_mode: host 即可。
+            "TASKSTATS 族在当前网络命名空间不可见 (errno 2；CentOS 7 等旧内核需 network_mode: host)".to_string()
+        } else {
+            format!("内核拒绝 TASKSTATS 族查询 (errno {err})")
+        });
     }
     let attrs = message_payload(&buf[..n]).ok_or("TASKSTATS 族应答解析失败")?;
     let mut id = None;

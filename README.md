@@ -166,6 +166,11 @@ docker compose logs -f
 
 在容器内监控的同样是宿主机的 IO（`/proc` 为宿主机内核的全局数据）；监控其他用户进程的参数已配好。
 
+**CentOS 7 等旧内核（3.10）**：TASKSTATS 族只在初始网络命名空间可见，容器默认的
+bridge 网络里会报 `taskstats 不可用 (errno 2)`、进程级门控停用（页面横幅会提示）。
+解法是让容器共用宿主机网络：compose 里加 `network_mode: host` 并删掉 `ports` 映射，
+`-l 0.0.0.0:8080` 不变（iomon 直接监听宿主机端口）。新内核不受影响。
+
 ## 交叉编译提示（可选）
 
 在 Windows 上为 Linux 构建，最省事的方式是 WSL 内直接 `cargo build --release`；
