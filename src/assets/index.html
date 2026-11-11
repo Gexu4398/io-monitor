@@ -734,34 +734,38 @@ document.querySelectorAll("#thresholdRow button").forEach((btn) => {
   });
 });
 
+// 防重入：服务端变慢时上一次 fetch 未返回，跳过本轮而不是叠新请求，
+// 否则 1s 一发的轮询会重叠堆积，把连接与服务端线程一起拖垮。
+let tickBusy = false;
 async function tick() {
-  if (onAlerts) {
-    if (preview) { renderAlerts(DEMO_ALERTS); return; }
-    const range = dayBounds(selectedOffset);
-    try {
-    const res = await fetch("/api/records?from=" + range.from + "&to=" + range.to, { cache: "no-store" });
-      renderAlerts(await res.json());
-    } catch (e) {
-      renderAlerts({ ok: false, error: "连不上 iomon web。" });
-    }
-    return;
-  }
-  if (preview) {
-    if (!hist[0].length) {
-      const base = [DEMO.total_read, DEMO.total_write, DEMO.actual_read, DEMO.actual_write];
-      for (let i = 0; i < 28; i++) {
-        base.forEach((v, k) => hist[k].push(Math.max(0, v * (0.35 + 0.65 * Math.abs(Math.sin(i / 4 + k))))));
-      }
-      lastSeq = DEMO.seq;
-    }
-    render(DEMO);
-    return;
-  }
+  if (tickBusy) return;
+  tickBusy = true;
   try {
+    if (onAlerts) {
+      if (preview) { renderAlerts(DEMO_ALERTS); return; }
+      const range = dayBounds(selectedOffset);
+      const res = await fetch("/api/records?from=" + range.from + "&to=" + range.to, { cache: "no-store" });
+      renderAlerts(await res.json());
+      return;
+    }
+    if (preview) {
+      if (!hist[0].length) {
+        const base = [DEMO.total_read, DEMO.total_write, DEMO.actual_read, DEMO.actual_write];
+        for (let i = 0; i < 28; i++) {
+          base.forEach((v, k) => hist[k].push(Math.max(0, v * (0.35 + 0.65 * Math.abs(Math.sin(i / 4 + k))))));
+        }
+        lastSeq = DEMO.seq;
+      }
+      render(DEMO);
+      return;
+    }
     const res = await fetch("/api/live", { cache: "no-store" });
     render(await res.json());
   } catch (e) {
-    render({ ok: false, error: "连不上 iomon web。确认进程还在，并且用的是它提供的地址。" });
+    if (onAlerts) renderAlerts({ ok: false, error: "连不上 iomon web。" });
+    else render({ ok: false, error: "连不上 iomon web。确认进程还在，并且用的是它提供的地址。" });
+  } finally {
+    tickBusy = false;
   }
 }
 bootNav();

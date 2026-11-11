@@ -19,6 +19,10 @@ use crate::json::{json_str, push_num};
 const RETAIN_SECS: u64 = 7 * 24 * 3600;
 /// 磁盘清理的最小间隔。ingest 每帧都会跑，清理挂到小时级足够。
 const PURGE_INTERVAL_SECS: u64 = 3600;
+/// 内存中已结束 episode 的上限（按结束时间保留最近的）。阈值抖动的负载会让
+/// episode 以每秒一条的速度堆积，不设上限的话 to_json 每次请求都要在全局
+/// 锁内全量扫描排序，拖垮采样与页面。
+const MAX_CLOSED: usize = 10_000;
 const MAX_LIST: usize = 400;
 const MAX_OFFENDERS: usize = 500;
 
@@ -197,6 +201,11 @@ impl AlertBook {
                 self.closed.push_front(ep);
             }
         }
+        // 阈值抖动时 episode 每秒开关一条：按上限裁掉最旧的，保证 to_json
+        // 的扫描量有界。
+        while self.closed.len() > MAX_CLOSED {
+            self.closed.pop_back();
+        }
         self.retain(now);
         // 清理是两次 read_dir + 逐文件 stat，不值得每帧跑；每小时一次。
         if now.saturating_sub(self.last_purge) >= PURGE_INTERVAL_SECS {
@@ -285,6 +294,13 @@ impl AlertBook {
         let bucket = now / 60;
         let same = self.minutes.back().map(|m| m.bucket == bucket).unwrap_or(false);
         if !same {
+            // 分钟滚动时把刚结束的那一分钟落盘：一天恰好 1440 行。
+            // （此前按"有变化就写"会在空闲机器上每秒写一行——0>=0 恒真，
+            // 一天 86400 行，重启加载要解析几十万行。）
+            if let Some(prev) = self.minutes.back() {
+                let snap = prev.clone();
+                self.save_minute(&snap);
+            }
             self.minutes.push_back(Minute {
                 bucket,
                 max_io: 0.0,
@@ -300,31 +316,24 @@ impl AlertBook {
             }
         }
         let minute = self.minutes.back_mut().unwrap();
-        let mut changed = false;
         if actual_read > minute.max_read {
             minute.max_read = actual_read;
-            changed = true;
         }
         if actual_write > minute.max_write {
             minute.max_write = actual_write;
-            changed = true;
         }
         if over {
             minute.over = minute.over.saturating_add(1);
-            changed = true;
         }
-        if top_io >= minute.max_io {
+        if top_io > minute.max_io {
             minute.max_io = top_io;
-            changed = true;
-            if top_io > 0.0 {
-                minute.top_io = top_io;
-                minute.top_cmd = top_cmd;
-                minute.top_pid = top_pid;
-            }
-        }
-        if changed {
-            let snap = minute.clone();
-            self.save_minute(&snap);
+            minute.top_io = top_io;
+            minute.top_cmd = top_cmd;
+            minute.top_pid = top_pid;
+        } else if top_io == minute.max_io && top_io > 0.0 && !top_cmd.is_empty() {
+            // 并列时保留最新命令名，纯内存更新，不触发写盘
+            minute.top_cmd = top_cmd;
+            minute.top_pid = top_pid;
         }
     }
 
@@ -571,6 +580,15 @@ impl AlertBook {
         let mut minutes: Vec<Minute> = folded.into_values().collect();
         minutes.sort_by_key(|m| m.bucket);
         self.minutes = minutes.into_iter().collect();
+        while self.minutes.len() > 7 * 24 * 60 {
+            self.minutes.pop_front();
+        }
+        // 旧版本可能在磁盘上堆了远超上限的 episode（阈值抖动）：加载后按
+        // 结束时间保留最近的 MAX_CLOSED 条，保证 to_json 的扫描量有界。
+        let mut closed: Vec<Episode> = self.closed.drain(..).collect();
+        closed.sort_by(|a, b| b.end.cmp(&a.end).then(b.start.cmp(&a.start)));
+        closed.truncate(MAX_CLOSED);
+        self.closed = closed.into();
     }
 
     // map_while：读取中途出错时停止，而不是在 Err 上无限迭代
@@ -844,6 +862,46 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// 分钟统计改为"滚动时落盘"后：同一分钟内的空闲帧不写文件，
+    /// 跨分钟后恰好写一行刚结束的分钟。
+    #[test]
+    fn idle_frames_within_a_minute_do_not_write() {
+        let dir = std::env::temp_dir().join(format!("iomon-minute-write-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let now = 1_700_000_000u64;
+        let mut book = AlertBook::open(dir.clone(), 20.0, now);
+        for i in 0..5u64 {
+            book.ingest(now + i, 1.0, 0.0, 0.0, &[]);
+        }
+        let minute_file = dir.join("minutes").join(format!("{}.jsonl", ymd(now)));
+        assert!(!minute_file.exists(), "同一分钟内的帧不应写盘");
+        let next_minute = (now / 60 + 1) * 60;
+        book.ingest(next_minute + 1, 1.0, 0.0, 0.0, &[]);
+        assert!(minute_file.exists(), "分钟滚动后应落盘");
+        let text = fs::read_to_string(&minute_file).unwrap();
+        assert_eq!(text.lines().count(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 阈值抖动时 episode 每秒开关一条，closed 必须被裁到上限。
+    #[test]
+    fn closed_episodes_are_capped() {
+        let mut book = AlertBook::new(20.0, 1_000);
+        for i in 0..(MAX_CLOSED * 2 + 4) {
+            let t = 1_000 + i as u64;
+            if i % 2 == 0 {
+                book.ingest(t, 1.0, 0.0, 0.0, &[snap(7, 40.0, 50.0)]);
+            } else {
+                book.ingest(t, 1.0, 0.0, 0.0, &[]);
+            }
+        }
+        assert!(book.closed.len() <= MAX_CLOSED);
+        assert_eq!(book.closed.len(), MAX_CLOSED);
+        // 保留的是最近的：最新一段的结束时间应靠近循环尾部
+        let last_end = book.closed.front().unwrap().end;
+        assert!(last_end >= 1_000 + MAX_CLOSED as u64);
+    }
+
     #[test]
     fn unix_day_is_utc_date() {
         assert_eq!(ymd(0), "1970-01-01");
@@ -884,16 +942,18 @@ mod tests {
         };
         let mut book = AlertBook::open(dir.clone(), 20.0, now);
         book.ingest(now, 1.0, 2e6, 3e6, std::slice::from_ref(&snap));
-        book.ingest(now + 1, 1.0, 0.0, 0.0, &[]); // 下一帧无超标，episode 关闭并落盘
+        // 下一分钟的第一帧：episode 关闭落盘，刚结束的分钟也落盘
+        let next_minute = (now / 60 + 1) * 60;
+        book.ingest(next_minute, 1.0, 0.0, 0.0, &[]);
 
-        let again = AlertBook::open(dir.clone(), 20.0, now + 10);
+        let again = AlertBook::open(dir.clone(), 20.0, next_minute + 10);
         assert_eq!(again.closed.len(), 1);
         let ep = &again.closed[0];
         assert_eq!(ep.pid, 31415);
         assert_eq!(ep.user, "ro\"ot\\1000\n");
         assert_eq!(ep.command, "py\"thon -c 'x = {\"pid\": 1}' 中文\u{1}换行\n");
         assert_eq!(ep.start, now);
-        assert_eq!(ep.end, now + 1);
+        assert_eq!(ep.end, next_minute);
         assert_eq!(ep.samples, 1);
         assert!((ep.over_s - 1.0).abs() < 1e-9);
         assert!((ep.max_io - 88.5).abs() < 1e-6);
