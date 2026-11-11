@@ -256,6 +256,11 @@ pub struct RawFrame {
     pub threads_read: usize,
     /// 本帧 poll 耗时（毫秒，自观测）
     pub scan_ms: f64,
+    /// taskstats 是否可用（L1 门控依赖；false 时采样为全量降级模式）
+    pub ts_active: bool,
+    /// 本帧未下钻的进程数 / 枚举到的进程总数（自观测：门控效果）
+    pub procs_quiet: usize,
+    pub procs_seen: usize,
     pub total_read: f64,
     pub total_write: f64,
     /// Actual 吞吐（/proc/vmstat 的 pgpgin/pgpgout 差值，与 iotop 相同）
@@ -310,10 +315,14 @@ impl ThreadScanner {
         let mut skipped = 0usize;
         let mut threads_read = 0usize;
         let mut known_threads = 0usize;
+        let mut procs_quiet = 0usize;
+        let procs_seen;
 
         if machine_quiet {
             // 全零帧：不读任何 /proc/<pid>，不动任何基线。下一帧恢复
             // 活动时，差值会以真实经过时间摊回。
+            procs_seen = self.procs.len();
+            procs_quiet = procs_seen;
             for (&pid, entry) in &self.procs {
                 for &tid in entry.threads.keys() {
                     rows.push(RateRow {
@@ -330,8 +339,7 @@ impl ThreadScanner {
         } else {
             let mut seen: HashSet<u32> = HashSet::new();
             for pid in list_numeric_dirs("/proc") {
-                seen.insert(pid);
-                let cur_agg = proc_io::read_proc_io(pid).ok().map(|io| DiskKey::of(&io));
+                seen.insert(pid);                let cur_agg = proc_io::read_proc_io(pid).ok().map(|io| DiskKey::of(&io));
                 let cur_tgid = if ts_active {
                     self.ts.as_mut().and_then(|t| t.query_tgid(pid))
                 } else {
@@ -345,6 +353,7 @@ impl ThreadScanner {
                 if quiet {
                     // 聚合证据表明该进程所有线程计数都没动：基线值依然精确，
                     // 刷新时间戳即可，恢复活动那帧回到最近一帧的瞬时口径。
+                    procs_quiet += 1;
                     let e = self.procs.get_mut(&pid).unwrap();
                     e.at = started;
                     for &tid in e.threads.keys() {
@@ -422,6 +431,7 @@ impl ThreadScanner {
                 );
             }
             self.procs.retain(|pid, _| seen.contains(pid));
+            procs_seen = seen.len();
         }
 
         if per_process {
@@ -456,6 +466,9 @@ impl ThreadScanner {
             threads: known_threads,
             threads_read,
             scan_ms,
+            ts_active,
+            procs_quiet,
+            procs_seen,
             total_read,
             total_write,
             actual_read,

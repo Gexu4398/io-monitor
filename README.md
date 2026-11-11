@@ -147,7 +147,7 @@ sda            12.3     45.6        512.0     2048.0     0.05     1.23     3.4
 
 没有 root/CAP_NET_ADMIN（无 taskstats）时 L1 自动停用——延迟改走线程 stat 的 blkio tick，聚合层没有"延迟也没变"的证据，精确优先；L0 与惰性身份解析仍然生效。
 
-`/api/live` 暴露自观测字段：`scan_ms`（本帧采样耗时）、`self_cpu_pct`（iomon 自身 CPU 占比）、`threads_read`/`threads`（本帧实际下钻的线程数 / 已知线程总数）。空闲机器上 `threads_read` 应为 0、`self_cpu_pct` 接近 0。
+`/api/live` 暴露自观测字段：`scan_ms`（本帧采样耗时）、`self_cpu_pct`（iomon 自身 CPU 占比）、`threads_read`/`threads`（本帧实际下钻的线程数 / 已知线程总数）、`taskstats`（是否可用，false 时 L1 停用、采样为全量降级模式）、`procs_quiet`/`procs_seen`（本帧被门控跳过的进程数 / 枚举到的进程总数）。空闲机器上 `threads_read` 应为 0、`self_cpu_pct` 接近 0；忙碌机器上 `procs_quiet` 占比越高说明门控越有效。
 
 ## Docker 运行（可选）
 
