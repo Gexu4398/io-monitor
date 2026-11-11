@@ -17,6 +17,8 @@ use std::path::{Path, PathBuf};
 use crate::json::{json_str, push_num};
 
 const RETAIN_SECS: u64 = 7 * 24 * 3600;
+/// 磁盘清理的最小间隔。ingest 每帧都会跑，清理挂到小时级足够。
+const PURGE_INTERVAL_SECS: u64 = 3600;
 const MAX_LIST: usize = 400;
 const MAX_OFFENDERS: usize = 500;
 
@@ -80,6 +82,7 @@ pub struct AlertBook {
     offenders: HashMap<u32, Offender>,
     minutes: VecDeque<Minute>,
     dir: Option<PathBuf>,
+    last_purge: u64,
     peak_io: f64,
     peak_io_at: u64,
     peak_io_cmd: String,
@@ -102,6 +105,7 @@ impl AlertBook {
             offenders: HashMap::new(),
             minutes: VecDeque::new(),
             dir: None,
+            last_purge: now,
             peak_io: 0.0,
             peak_io_at: 0,
             peak_io_cmd: String::new(),
@@ -194,6 +198,11 @@ impl AlertBook {
             }
         }
         self.retain(now);
+        // 清理是两次 read_dir + 逐文件 stat，不值得每帧跑；每小时一次。
+        if now.saturating_sub(self.last_purge) >= PURGE_INTERVAL_SECS {
+            self.purge_files(now);
+            self.last_purge = now;
+        }
         self.trim_offenders();
         self.note_minute(now, hottest_io, hottest_cmd, hottest_pid, actual_read, actual_write, !still.is_empty());
     }
@@ -517,7 +526,6 @@ impl AlertBook {
         let cutoff = now.saturating_sub(RETAIN_SECS);
         self.closed.retain(|ep| ep.end >= cutoff);
         self.minutes.retain(|m| m.bucket.saturating_mul(60).saturating_add(60) > cutoff);
-        self.purge_files(now);
     }
 
     fn save_episode(&self, ep: &Episode) {

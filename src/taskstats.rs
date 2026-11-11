@@ -31,6 +31,10 @@ const CTRL_ATTR_FAMILY_NAME: u16 = 2;
 const TASKSTATS_CMD_GET: u8 = 1;
 #[cfg(target_os = "linux")]
 const TASKSTATS_CMD_ATTR_PID: u16 = 1;
+/// 用 TGID 查询时内核返回 TASKSTATS_TYPE_AGGR_TGID（线程组求和的延迟），
+/// find_stats 已支持该嵌套结构。
+#[cfg(target_os = "linux")]
+const TASKSTATS_CMD_ATTR_TGID: u16 = 2;
 #[cfg(any(test, target_os = "linux"))]
 const TASKSTATS_TYPE_STATS: u16 = 3;
 #[cfg(any(test, target_os = "linux"))]
@@ -88,36 +92,56 @@ impl Taskstats {
         }
     }
 
-    /// 查询一个 TID。权限不足时把套接字标为停用并返回 None。
+    /// taskstats 是否仍可用（未被 EPERM 自禁用）。
+    pub fn is_active(&self) -> bool {
+        !self.disabled
+    }
+
+    /// 查询一个 TID 的任务级延迟。权限不足时把套接字标为停用并返回 None。
+    #[cfg(target_os = "linux")]
     pub fn query(&mut self, tid: u32) -> Option<Delays> {
+        self.query_attr(TASKSTATS_CMD_ATTR_PID, tid)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn query(&mut self, _tid: u32) -> Option<Delays> {
+        None
+    }
+
+    /// TGID 聚合查询：一次往返拿到整个线程组的延迟合计（L1 门控用）。
+    /// 失败/无权限的处理与 query 相同；返回 None 时调用方应视为"没有证据"。
+    #[cfg(target_os = "linux")]
+    pub fn query_tgid(&mut self, tgid: u32) -> Option<Delays> {
+        self.query_attr(TASKSTATS_CMD_ATTR_TGID, tgid)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn query_tgid(&mut self, _tgid: u32) -> Option<Delays> {
+        None
+    }
+
+    #[cfg(target_os = "linux")]
+    fn query_attr(&mut self, attr: u16, id: u32) -> Option<Delays> {
         if self.disabled {
             return None;
         }
-        #[cfg(target_os = "linux")]
-        {
-            match self.roundtrip(tid) {
-                Ok(d) => Some(d),
-                // EPERM / EACCES：这个权限对所有线程都一样，不用再试。
-                Err(1) | Err(13) => {
-                    self.disabled = true;
-                    None
-                }
-                Err(_) => None,
+        match self.roundtrip(attr, id) {
+            Ok(d) => Some(d),
+            // EPERM / EACCES：这个权限对所有线程都一样，不用再试。
+            Err(1) | Err(13) => {
+                self.disabled = true;
+                None
             }
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = tid;
-            None
+            Err(_) => None,
         }
     }
 
     #[cfg(target_os = "linux")]
-    fn roundtrip(&mut self, tid: u32) -> Result<Delays, i32> {
+    fn roundtrip(&mut self, attr: u16, id: u32) -> Result<Delays, i32> {
         self.seq = self.seq.wrapping_add(1);
         let seq = self.seq;
-        let payload = tid.to_le_bytes();
-        let req = encode_request(self.family, TASKSTATS_CMD_GET, TASKSTATS_CMD_ATTR_PID, &payload, seq);
+        let payload = id.to_le_bytes();
+        let req = encode_request(self.family, TASKSTATS_CMD_GET, attr, &payload, seq);
         syscall::send_netlink(self.fd, &req)?;
         let n = syscall::recv_netlink(self.fd, &mut self.buf)?;
         delays_from_reply(&self.buf[..n])
@@ -380,6 +404,29 @@ mod tests {
         let d = delays_from_reply(&msg).unwrap();
         assert_eq!(d.blkio_ns, 50);
         assert_eq!(d.swapin_ns, 60);
+    }
+
+    /// TGID 查询走同一条解析链路：AGGR_TGID 嵌套同样能取出延迟。
+    #[test]
+    fn parses_nested_aggr_tgid() {
+        let mut stats = vec![0u8; 64];
+        put_u16(&mut stats, 0, 16);
+        put_u64(&mut stats, 40, 111);
+        put_u64(&mut stats, 56, 222);
+        let inner = {
+            let mut v = nla(2, &42u32.to_le_bytes());
+            v.extend(nla(TASKSTATS_TYPE_STATS, &stats));
+            v
+        };
+        let attrs = nla(TASKSTATS_TYPE_AGGR_TGID, &inner);
+        let total = 20 + attrs.len();
+        let mut msg = vec![0u8; total];
+        msg[0..4].copy_from_slice(&(total as u32).to_le_bytes());
+        msg[4..6].copy_from_slice(&20u16.to_le_bytes());
+        msg[20..].copy_from_slice(&attrs);
+        let d = delays_from_reply(&msg).unwrap();
+        assert_eq!(d.blkio_ns, 111);
+        assert_eq!(d.swapin_ns, 222);
     }
 
     #[test]

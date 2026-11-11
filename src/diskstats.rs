@@ -143,6 +143,24 @@ pub fn rates(prev: &[DiskStats], cur: &[DiskStats], elapsed_s: f64) -> Vec<DiskR
         .collect()
 }
 
+/// 全机自上一帧以来是否发生过任何块设备 IO 完成（L0 门控用）。
+/// 任一设备的读/写完成数或扇区数有变化、或出现新设备即视为有活动；
+/// 只存在于 prev 的设备（已移除）不构成活动。
+pub fn any_activity(prev: &[DiskStats], cur: &[DiskStats]) -> bool {
+    cur.iter().any(|c| {
+        let Some(p) = prev
+            .iter()
+            .find(|p| p.major == c.major && p.minor == c.minor)
+        else {
+            return true; // 新设备：保守视为有活动
+        };
+        c.reads_completed != p.reads_completed
+            || c.writes_completed != p.writes_completed
+            || c.sectors_read != p.sectors_read
+            || c.sectors_written != p.sectors_written
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,6 +252,27 @@ mod tests {
         let r = rate(&prev, &cur, 2.0);
         assert!(!r.active);
         assert!((r.await_ms - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn any_activity_detects_changes_and_new_devices() {
+        // DiskStats 不是 Copy，用闭包每次生成新值
+        let base = || stats(100, 200, 0, 50, 400, 0, 1000, 0);
+        // 无变化 → 无活动
+        assert!(!any_activity(&[base()], &[stats(100, 200, 0, 50, 400, 0, 1000, 0)]));
+        // 完成数或扇区数任一变化 → 有活动
+        assert!(any_activity(&[base()], &[stats(101, 200, 0, 50, 400, 0, 1000, 0)]));
+        assert!(any_activity(&[base()], &[stats(100, 201, 0, 50, 400, 0, 1000, 0)]));
+        assert!(any_activity(&[base()], &[stats(100, 200, 0, 50, 401, 0, 1000, 0)]));
+        // 纯时间字段变化不算：门控只看完成数与扇区数（IO 完成才构成活动）
+        assert!(!any_activity(&[base()], &[stats(100, 200, 1, 50, 400, 0, 1000, 0)]));
+        // 计数回退同样视为有活动（设备重置）
+        assert!(any_activity(&[base()], &[stats(99, 200, 0, 50, 400, 0, 1000, 0)]));
+        // 只在 cur 中出现的新设备 → 有活动；只在 prev 中的旧设备不算
+        let mut sdb = stats(1, 1, 0, 1, 1, 0, 1, 0);
+        sdb.minor = 16;
+        assert!(any_activity(&[base()], &[base(), sdb.clone()]));
+        assert!(!any_activity(&[base(), sdb], &[base()]));
     }
 
     #[test]

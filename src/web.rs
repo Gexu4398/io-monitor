@@ -4,6 +4,7 @@
 //! 不引入第三方库，页面随二进制一起编译进去。
 
 use std::collections::HashMap;
+use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::exit;
@@ -14,7 +15,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::records::{AlertBook, ProcSnap};
 use crate::diskstats::{self, DiskStats};
-use crate::iotop::{IoFrame, ProcRate, ProcSampler};
+use crate::iotop::{display_rates, ProcRate, RawFrame, ThreadScanner};
 use crate::json::{json_str, push_num};
 
 const PAGE: &str = include_str!("assets/index.html");
@@ -227,17 +228,35 @@ fn sampler_loop(hub: Arc<Mutex<Hub>>, interval: f64) {
         return;
     }
     let host = hostname();
-    let mut procs = ProcSampler::open();
+    let mut scanner = ThreadScanner::open();
     let mut disks: Option<DiskSample> = None;
     let mut seq = 0u64;
+    let mut self_prev: Option<(u64, Instant)> = None;
     loop {
-        let frame = procs.poll(ROW_LIMIT);
+        let frame = scanner.poll(false);
         let devices = sample_devices(&mut disks);
-        let snaps = if frame.ready {
-            aggregate_procs(&frame.rows)
+        let rates = if frame.ready {
+            display_rates(&frame, ROW_LIMIT, scanner.passwd())
         } else {
             Vec::new()
         };
+        let snaps = if frame.ready {
+            aggregate_procs(&rates)
+        } else {
+            Vec::new()
+        };
+
+        // 自观测：本进程自身的 CPU 占比（/proc/self/stat 的 utime+stime 差值）
+        let ticks = self_cpu_ticks();
+        let self_pct = match (self_prev, ticks) {
+            (Some((pt, at)), Some(t)) => {
+                let secs = at.elapsed().as_secs_f64().max(0.001);
+                t.saturating_sub(pt) as f64 / 100.0 / secs * 100.0
+            }
+            _ => 0.0,
+        };
+        self_prev = ticks.map(|t| (t, Instant::now()));
+
         seq = seq.wrapping_add(1);
         let mut guard = hub.lock().unwrap_or_else(|e| e.into_inner());
         let threshold = guard.threshold;
@@ -252,10 +271,28 @@ fn sampler_loop(hub: Arc<Mutex<Hub>>, interval: f64) {
             );
         }
         guard.delayacct = frame.delayacct;
-        guard.live = json_frame(seq, interval, &host, &frame, &devices, guard.book.open_count());
+        let ctx = FrameCtx {
+            seq,
+            interval,
+            host: &host,
+            alerts: guard.book.open_count(),
+            self_cpu_pct: self_pct,
+        };
+        guard.live = json_frame(&ctx, &frame, &rates, &devices);
         drop(guard);
         sleep(Duration::from_secs_f64(interval));
     }
+}
+
+/// 本进程自启动累计的 CPU tick（/proc/self/stat 的 utime+stime，USER_HZ=100）。
+fn self_cpu_ticks() -> Option<u64> {
+    let content = fs::read_to_string("/proc/self/stat").ok()?;
+    let close = content.rfind(')')?;
+    let fields: Vec<&str> = content[close + 1..].split_whitespace().collect();
+    // utime/stime 是第 14/15 字段；tail 从第 3 字段（state）开始，下标 = 字段号 - 3
+    let utime: u64 = fields.get(11).copied()?.parse().ok()?;
+    let stime: u64 = fields.get(12).copied()?.parse().ok()?;
+    Some(utime + stime)
 }
 
 pub fn serve(opts: WebOptions) {
@@ -461,34 +498,41 @@ fn write_resp(stream: &mut TcpStream, status: &str, ctype: &str, body: &[u8]) ->
 }
 
 fn json_pending() -> String {
-    "{\"ok\":true,\"seq\":0,\"ready\":false,\"error\":null,\"host\":\"\",\"interval_s\":0,\"elapsed_s\":0,\"delayacct\":true,\"skipped\":0,\"threads\":0,\"alerts\":0,\"total_read\":0,\"total_write\":0,\"actual_read\":0,\"actual_write\":0,\"devices\":[],\"rows\":[]}".to_string()
+    "{\"ok\":true,\"seq\":0,\"ready\":false,\"error\":null,\"host\":\"\",\"interval_s\":0,\"elapsed_s\":0,\"delayacct\":true,\"skipped\":0,\"threads\":0,\"threads_read\":0,\"scan_ms\":0,\"self_cpu_pct\":0,\"alerts\":0,\"total_read\":0,\"total_write\":0,\"actual_read\":0,\"actual_write\":0,\"devices\":[],\"rows\":[]}".to_string()
 }
 
 fn json_error(seq: u64, message: &str) -> String {
     format!(
-        "{{\"ok\":false,\"seq\":{},\"ready\":false,\"error\":{},\"host\":\"\",\"interval_s\":0,\"elapsed_s\":0,\"delayacct\":false,\"skipped\":0,\"threads\":0,\"alerts\":0,\"total_read\":0,\"total_write\":0,\"actual_read\":0,\"actual_write\":0,\"devices\":[],\"rows\":[]}}",
+        "{{\"ok\":false,\"seq\":{},\"ready\":false,\"error\":{},\"host\":\"\",\"interval_s\":0,\"elapsed_s\":0,\"delayacct\":false,\"skipped\":0,\"threads\":0,\"threads_read\":0,\"scan_ms\":0,\"self_cpu_pct\":0,\"alerts\":0,\"total_read\":0,\"total_write\":0,\"actual_read\":0,\"actual_write\":0,\"devices\":[],\"rows\":[]}}",
         seq,
         json_str(message)
     )
 }
 
-fn json_frame(
+/// json_frame 需要的帧外上下文（避免参数列表过长）。
+struct FrameCtx<'a> {
     seq: u64,
     interval: f64,
-    host: &str,
-    frame: &IoFrame,
-    devices: &[DeviceRate],
+    host: &'a str,
     alerts: usize,
+    self_cpu_pct: f64,
+}
+
+fn json_frame(
+    ctx: &FrameCtx,
+    frame: &RawFrame,
+    rates: &[ProcRate],
+    devices: &[DeviceRate],
 ) -> String {
     let mut out = String::with_capacity(4096);
     out.push_str("{\"ok\":true,\"seq\":");
-    out.push_str(&seq.to_string());
+    out.push_str(&ctx.seq.to_string());
     out.push_str(",\"ready\":");
     out.push_str(if frame.ready { "true" } else { "false" });
     out.push_str(",\"error\":null,\"host\":");
-    out.push_str(&json_str(host));
+    out.push_str(&json_str(ctx.host));
     out.push_str(",\"interval_s\":");
-    push_num(&mut out, interval);
+    push_num(&mut out, ctx.interval);
     out.push_str(",\"elapsed_s\":");
     push_num(&mut out, frame.elapsed_s);
     out.push_str(",\"delayacct\":");
@@ -497,8 +541,14 @@ fn json_frame(
     out.push_str(&frame.skipped.to_string());
     out.push_str(",\"threads\":");
     out.push_str(&frame.threads.to_string());
+    out.push_str(",\"threads_read\":");
+    out.push_str(&frame.threads_read.to_string());
+    out.push_str(",\"scan_ms\":");
+    push_num(&mut out, frame.scan_ms);
+    out.push_str(",\"self_cpu_pct\":");
+    push_num(&mut out, ctx.self_cpu_pct);
     out.push_str(",\"alerts\":");
-    out.push_str(&alerts.to_string());
+    out.push_str(&ctx.alerts.to_string());
     out.push_str(",\"total_read\":");
     push_num(&mut out, frame.total_read);
     out.push_str(",\"total_write\":");
@@ -529,7 +579,7 @@ fn json_frame(
         out.push('}');
     }
     out.push_str("],\"rows\":[");
-    for (i, r) in frame.rows.iter().enumerate() {
+    for (i, r) in rates.iter().enumerate() {
         if i > 0 {
             out.push(',');
         }

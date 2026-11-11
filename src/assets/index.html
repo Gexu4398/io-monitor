@@ -312,7 +312,8 @@
 const preview = new URLSearchParams(location.search).has("preview");
 const DEMO = {
   ok: true, ready: true, seq: 1, host: "preview", interval_s: 1, elapsed_s: 1,
-  delayacct: true, skipped: 0, threads: 8, error: null,
+  delayacct: true, skipped: 0, threads: 8, threads_read: 3, scan_ms: 2.4,
+  self_cpu_pct: 0.31, error: null,
   total_read: 4096, total_write: 17715, actual_read: 0, actual_write: 6799,
   devices: [
     { name: "nvme0n1", r_s: 12.4, w_s: 86.0, read_bps: 1.6e6, write_bps: 8.4e6, await_ms: 0.42, util_pct: 18.6 },
@@ -412,7 +413,13 @@ function render(data) {
     ? "示例数据，不是这台机器的 IO"
     : (data.ready ? host + "每 " + every + " 刷新" : "正在计算第一帧速率…");
   $("dot").classList.toggle("live", !!data.ready && !preview);
-  $("age").textContent = preview ? "预览" : (data.ready ? "实时" : "采集中");
+  // 自观测：采样耗时 / 自身 CPU / 实际下钻线程数（三层门控的效果直接可见）
+  const obs = data.ready && !preview
+    ? " · 采样 " + Number(data.scan_ms || 0).toFixed(1) + "ms"
+      + " · 自身 " + Number(data.self_cpu_pct || 0).toFixed(2) + "%"
+      + " · 读取 " + (data.threads_read || 0) + "/" + (data.threads || 0) + " 线程"
+    : "";
+  $("age").textContent = (preview ? "预览" : (data.ready ? "实时" : "采集中")) + obs;
 
   const banner = $("banner");
   const notes = [];
