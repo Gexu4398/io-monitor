@@ -314,7 +314,7 @@ const preview = new URLSearchParams(location.search).has("preview");
 const DEMO = {
   ok: true, ready: true, seq: 1, host: "preview", interval_s: 1, elapsed_s: 1,
   delayacct: true, skipped: 0, threads: 8, threads_read: 3, scan_ms: 2.4,
-  self_cpu_pct: 0.31, taskstats: true, procs_quiet: 6, procs_seen: 9, error: null,
+  self_cpu_pct: 0.31, taskstats: true, ts_reason: "", procs_quiet: 6, procs_seen: 9, error: null,
   total_read: 4096, total_write: 17715, actual_read: 0, actual_write: 6799,
   devices: [
     { name: "nvme0n1", r_s: 12.4, w_s: 86.0, read_bps: 1.6e6, write_bps: 8.4e6, await_ms: 0.42, util_pct: 18.6 },
@@ -432,7 +432,7 @@ function render(data) {
   const banner = $("banner");
   const notes = [];
   if (!data.delayacct) notes.push("kernel.task_delayacct 未开启，IO 与 SWAPIN 会一直是 0。宿主机执行：echo 1 > /proc/sys/kernel/task_delayacct");
-  if (data.ready && data.taskstats === false) notes.push("taskstats 不可用（需要 NET_ADMIN），进程级门控已停用，采样为全量降级模式。");
+  if (data.ready && data.taskstats === false) notes.push("taskstats 不可用" + (data.ts_reason ? "：" + data.ts_reason : "") + "，进程级门控已停用，采样为全量降级模式。");
   if (data.skipped > 0) notes.push("另有 " + data.skipped + " 个线程因权限或退出未计入。Docker 在 Ubuntu 上需要 apparmor:unconfined。");
   if (preview) notes.push('这是写死的示例。<a href="/">返回实时</a>');
   banner.classList.toggle("show", notes.length > 0);

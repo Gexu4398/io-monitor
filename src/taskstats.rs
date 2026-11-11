@@ -44,6 +44,8 @@ const TASKSTATS_TYPE_AGGR_TGID: u16 = 5;
 
 pub struct Taskstats {
     disabled: bool,
+    /// 停用原因（空 = 正常启用），随帧上报用于页面横幅诊断
+    reason: String,
     #[cfg(target_os = "linux")]
     fd: i32,
     #[cfg(target_os = "linux")]
@@ -55,27 +57,31 @@ pub struct Taskstats {
 }
 
 impl Taskstats {
-    /// 打开 netlink 并解析 TASKSTATS 族 ID。失败时返回 None，调用方应退回 /proc。
-    pub fn open() -> Option<Self> {
+    /// 打开 netlink 并解析 TASKSTATS 族 ID。失败时 Err 给出人话原因，
+    /// 区分 socket 受限、内核无 TASKSTATS、权限被拒等不同情形。
+    pub fn open() -> Result<Self, String> {
         #[cfg(target_os = "linux")]
         {
-            let fd = syscall::netlink_socket().ok()?;
-            if syscall::bind_netlink(fd).is_err() {
+            let fd = syscall::netlink_socket()
+                .map_err(|e| format!("netlink socket 创建失败 (errno {e})"))?;
+            if let Err(e) = syscall::bind_netlink(fd) {
                 syscall::close(fd);
-                return None;
+                return Err(format!("netlink bind 失败 (errno {e})"));
             }
             // 超时设不上也还能用，只是极端情况下一次查询可能多等一会儿。
             let _ = syscall::set_recv_timeout(fd);
             let mut buf = vec![0u8; 2048];
             let family = match family_id(fd, &mut buf) {
-                Some(id) if id != 0 => id,
-                _ => {
+                Ok(id) if id != 0 => id,
+                Ok(_) => return Err("TASKSTATS 族应答缺少 family id".to_string()),
+                Err(e) => {
                     syscall::close(fd);
-                    return None;
+                    return Err(e);
                 }
             };
             let mut ts = Self {
                 disabled: false,
+                reason: String::new(),
                 fd,
                 family,
                 buf,
@@ -84,17 +90,26 @@ impl Taskstats {
             // 先探一次 pid 1。没有 CAP_NET_ADMIN 时会 EPERM，立刻停用，
             // 避免每个线程都空转一圈，也避免同一次采样里混用两种数据源。
             let _ = ts.query(1);
-            Some(ts)
+            Ok(ts)
         }
         #[cfg(not(target_os = "linux"))]
         {
-            None
+            Err("非 Linux 平台".to_string())
         }
     }
 
     /// taskstats 是否仍可用（未被 EPERM 自禁用）。
     pub fn is_active(&self) -> bool {
         !self.disabled
+    }
+
+    /// 停用原因；启用中返回 None。
+    pub fn inactive_reason(&self) -> Option<&str> {
+        if self.disabled {
+            Some(&self.reason)
+        } else {
+            None
+        }
     }
 
     /// 查询一个 TID 的任务级延迟。权限不足时把套接字标为停用并返回 None。
@@ -128,8 +143,9 @@ impl Taskstats {
         match self.roundtrip(attr, id) {
             Ok(d) => Some(d),
             // EPERM / EACCES：这个权限对所有线程都一样，不用再试。
-            Err(1) | Err(13) => {
+            Err(e @ (1 | 13)) => {
                 self.disabled = true;
+                self.reason = format!("查询被内核拒绝 (errno {e})，需要 CAP_NET_ADMIN");
                 None
             }
             Err(_) => None,
@@ -158,15 +174,16 @@ impl Drop for Taskstats {
 }
 
 #[cfg(target_os = "linux")]
-fn family_id(fd: i32, buf: &mut [u8]) -> Option<u16> {
+fn family_id(fd: i32, buf: &mut [u8]) -> Result<u16, String> {
     let name = b"TASKSTATS\0";
     let req = encode_request(GENL_ID_CTRL, CTRL_CMD_GETFAMILY, CTRL_ATTR_FAMILY_NAME, name, 1);
-    syscall::send_netlink(fd, &req).ok()?;
-    let n = syscall::recv_netlink(fd, buf).ok()?;
-    if nl_errno(&buf[..n]).is_some() {
-        return None;
+    syscall::send_netlink(fd, &req).map_err(|e| format!("netlink 发送失败 (errno {e})"))?;
+    let n = syscall::recv_netlink(fd, buf).map_err(|e| format!("netlink 接收失败 (errno {e})"))?;
+    if let Some(err) = nl_errno(&buf[..n]) {
+        // ENOENT(2)：内核没有 TASKSTATS 族（未编译或模块未加载）
+        return Err(format!("内核拒绝 TASKSTATS 族查询 (errno {err})"));
     }
-    let attrs = message_payload(&buf[..n])?;
+    let attrs = message_payload(&buf[..n]).ok_or("TASKSTATS 族应答解析失败")?;
     let mut id = None;
     walk_attrs(attrs, |ty, payload| {
         if ty == CTRL_ATTR_FAMILY_ID && payload.len() >= 2 {
@@ -176,7 +193,7 @@ fn family_id(fd: i32, buf: &mut [u8]) -> Option<u16> {
             false
         }
     });
-    id
+    id.ok_or_else(|| "TASKSTATS 族应答缺少 family id".to_string())
 }
 
 /// 从一条 taskstats 应答里取出延迟。错误报文返回正的 errno。

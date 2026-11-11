@@ -258,6 +258,8 @@ pub struct RawFrame {
     pub scan_ms: f64,
     /// taskstats 是否可用（L1 门控依赖；false 时采样为全量降级模式）
     pub ts_active: bool,
+    /// taskstats 不可用的原因（可用时为空串），随帧上报供页面诊断
+    pub ts_reason: String,
     /// 本帧未下钻的进程数 / 枚举到的进程总数（自观测：门控效果）
     pub procs_quiet: usize,
     pub procs_seen: usize,
@@ -271,6 +273,8 @@ pub struct RawFrame {
 
 pub struct ThreadScanner {
     ts: Option<Taskstats>,
+    /// taskstats 打开失败的诊断（打开成功为空串）
+    ts_open_fail: String,
     procs: HashMap<u32, ProcEntry>,
     /// L0 基线；首帧 None ⟹ 全量
     disks_prev: Option<Vec<DiskStats>>,
@@ -283,8 +287,13 @@ pub struct ThreadScanner {
 
 impl ThreadScanner {
     pub fn open() -> Self {
+        let (ts, ts_open_fail) = match Taskstats::open() {
+            Ok(t) => (Some(t), String::new()),
+            Err(e) => (None, e),
+        };
         Self {
-            ts: Taskstats::open(),
+            ts,
+            ts_open_fail,
             procs: HashMap::new(),
             disks_prev: None,
             vm_prev: None,
@@ -456,6 +465,11 @@ impl ThreadScanner {
 
         let ready = self.last_frame.is_some() && !self.procs.is_empty();
         let scan_ms = started.elapsed().as_secs_f64() * 1000.0;
+        // 停用原因：运行中被 EPERM 禁用优先，其次打开失败的原因
+        let ts_reason = match self.ts.as_ref() {
+            Some(t) => t.inactive_reason().unwrap_or_default().to_string(),
+            None => self.ts_open_fail.clone(),
+        };
         self.last_frame = Some(started);
 
         RawFrame {
@@ -467,6 +481,7 @@ impl ThreadScanner {
             threads_read,
             scan_ms,
             ts_active,
+            ts_reason,
             procs_quiet,
             procs_seen,
             total_read,

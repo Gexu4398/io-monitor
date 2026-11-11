@@ -498,12 +498,12 @@ fn write_resp(stream: &mut TcpStream, status: &str, ctype: &str, body: &[u8]) ->
 }
 
 fn json_pending() -> String {
-    "{\"ok\":true,\"seq\":0,\"ready\":false,\"error\":null,\"host\":\"\",\"interval_s\":0,\"elapsed_s\":0,\"delayacct\":true,\"skipped\":0,\"threads\":0,\"threads_read\":0,\"scan_ms\":0,\"self_cpu_pct\":0,\"taskstats\":false,\"procs_quiet\":0,\"procs_seen\":0,\"alerts\":0,\"total_read\":0,\"total_write\":0,\"actual_read\":0,\"actual_write\":0,\"devices\":[],\"rows\":[]}".to_string()
+    "{\"ok\":true,\"seq\":0,\"ready\":false,\"error\":null,\"host\":\"\",\"interval_s\":0,\"elapsed_s\":0,\"delayacct\":true,\"skipped\":0,\"threads\":0,\"threads_read\":0,\"scan_ms\":0,\"self_cpu_pct\":0,\"taskstats\":false,\"ts_reason\":\"\",\"procs_quiet\":0,\"procs_seen\":0,\"alerts\":0,\"total_read\":0,\"total_write\":0,\"actual_read\":0,\"actual_write\":0,\"devices\":[],\"rows\":[]}".to_string()
 }
 
 fn json_error(seq: u64, message: &str) -> String {
     format!(
-        "{{\"ok\":false,\"seq\":{},\"ready\":false,\"error\":{},\"host\":\"\",\"interval_s\":0,\"elapsed_s\":0,\"delayacct\":false,\"skipped\":0,\"threads\":0,\"threads_read\":0,\"scan_ms\":0,\"self_cpu_pct\":0,\"taskstats\":false,\"procs_quiet\":0,\"procs_seen\":0,\"alerts\":0,\"total_read\":0,\"total_write\":0,\"actual_read\":0,\"actual_write\":0,\"devices\":[],\"rows\":[]}}",
+        "{{\"ok\":false,\"seq\":{},\"ready\":false,\"error\":{},\"host\":\"\",\"interval_s\":0,\"elapsed_s\":0,\"delayacct\":false,\"skipped\":0,\"threads\":0,\"threads_read\":0,\"scan_ms\":0,\"self_cpu_pct\":0,\"taskstats\":false,\"ts_reason\":\"\",\"procs_quiet\":0,\"procs_seen\":0,\"alerts\":0,\"total_read\":0,\"total_write\":0,\"actual_read\":0,\"actual_write\":0,\"devices\":[],\"rows\":[]}}",
         seq,
         json_str(message)
     )
@@ -547,6 +547,8 @@ fn json_frame(
     push_num(&mut out, frame.scan_ms);
     out.push_str(",\"taskstats\":");
     out.push_str(if frame.ts_active { "true" } else { "false" });
+    out.push_str(",\"ts_reason\":");
+    out.push_str(&json_str(&frame.ts_reason));
     out.push_str(",\"procs_quiet\":");
     out.push_str(&frame.procs_quiet.to_string());
     out.push_str(",\"procs_seen\":");
