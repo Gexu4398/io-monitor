@@ -61,6 +61,7 @@
   #q:focus { border-color: rgba(231, 161, 90, 0.7); }
   .status {
     display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 13px;
+    white-space: nowrap;
   }
   .dot {
     width: 8px; height: 8px; border-radius: 50%; background: var(--faint);
@@ -409,18 +410,24 @@ function render(data) {
   app.classList.remove("hidden");
   const host = data.host ? data.host + " · " : "";
   const every = data.interval_s ? data.interval_s + "s" : "";
-  $("sub").textContent = preview
-    ? "示例数据，不是这台机器的 IO"
-    : (data.ready ? host + "每 " + every + " 刷新" : "正在计算第一帧速率…");
-  $("dot").classList.toggle("live", !!data.ready && !preview);
-  // 自观测：采样耗时 / 自身 CPU / 实际下钻线程数与进程门控（三层门控的效果直接可见）
-  const obs = data.ready && !preview
-    ? " · 采样 " + Number(data.scan_ms || 0).toFixed(1) + "ms"
-      + " · 自身 " + Number(data.self_cpu_pct || 0).toFixed(2) + "%"
-      + " · 读取 " + (data.threads_read || 0) + "/" + (data.threads || 0) + " 线程"
+  // 徽标只放最短的核心指标，避免把工具行的按钮挤到第二行；
+  // 明细放副标题行，完整明细挂悬停提示。
+  const ms = Number(data.scan_ms || 0).toFixed(0);
+  const cpu = Number(data.self_cpu_pct || 0).toFixed(1);
+  const brief = data.ready && !preview ? " · " + ms + "ms · " + cpu + "%" : "";
+  const detail = data.ready && !preview
+    ? " · 读取 " + (data.threads_read || 0) + "/" + (data.threads || 0) + " 线程"
       + " · 门控 " + (data.procs_quiet || 0) + "/" + (data.procs_seen || 0) + " 进程"
     : "";
-  $("age").textContent = (preview ? "预览" : (data.ready ? "实时" : "采集中")) + obs;
+  $("sub").textContent = preview
+    ? "示例数据，不是这台机器的 IO"
+    : (data.ready
+        ? host + "每 " + every + " 刷新" + detail
+        : "正在计算第一帧速率…");
+  $("dot").classList.toggle("live", !!data.ready && !preview);
+  const badge = preview ? "预览" : (data.ready ? "实时" : "采集中");
+  $("age").textContent = badge + brief;
+  $("age").title = badge + " · 采样 " + ms + "ms · 自身 " + cpu + "%" + detail;
 
   const banner = $("banner");
   const notes = [];
